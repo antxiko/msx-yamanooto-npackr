@@ -95,6 +95,10 @@ SOFTDB_TO_YAMA = {
     "Synthesizer":  MAPPER_PLAIN,  # Konami's Synthesizer (RC-741): 32K linear cart.
                                     # The Yamanooto's FPGA emulates the DAC, so the
                                     # cart's audio works without special handling.
+    "Majutsushi":   MAPPER_K4,     # Hai no Majutsushi - Mahjong 2: K4 banks + DAC
+                                    # writes at 0x5000-0x5FFF. Same story as the
+                                    # Synthesizer — FPGA emulates the DAC on real
+                                    # hardware; openMSX 21 Yamanooto.cc does not.
     "keyboardmaster": None,
     "Page23":    None,       # 32K cart at CPU 0x8000-0xFFFF (page 2+3) — needs special trampoline
     "R-Type":    None,       # Irem-specific bankswitching

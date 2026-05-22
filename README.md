@@ -128,6 +128,7 @@ the mapper is supported natively or whether you need a converter.
 | `ASCII8`                    | Convert via `ascii8_to_k5.py` (use `mapper = "k5"` in TOML after conversion) | Rewrites `LD (nn),A` opcodes that hit the ASCII8 switch zone. Note: if a "GoodMSX" K4 dump of the same game exists, prefer that — most Konami carts dumped as ASCII8 are re-packs of an originally K4 cart. |
 | `ASCII16`                   | Convert via `ascii16_to_k5.py` (mapper = "ascii16_k5") | Installs a RAM helper at 0xF000 that the patched ROM CALLs. Validated with Golvellius. |
 | `Synthesizer`               | Loaded as plain 32K. The Yamanooto FPGA emulates the PCM DAC on real hardware, so audio works. **openMSX gotcha:** `Yamanooto.cc` (21.0 and master) does not implement the DAC — the cart runs but stays silent in the emulator. Verify the dump in openMSX by loading it standalone with `-romtype Synthesizer`. |
+| `Majutsushi`                | Loaded as Konami-4 (K4). The cart is a normal K4 with an extra 8-bit DAC at `0x5000-0x5FFF` (Hai no Majutsushi - Mahjong 2). The Yamanooto FPGA emulates the DAC on real hardware. **Same openMSX gotcha as Synthesizer** — silent in emulator. |
 | `GameMaster2`, `keyboardmaster` | Not supported | Hardware-specific. |
 
 ### Mapper kinds in TOML
