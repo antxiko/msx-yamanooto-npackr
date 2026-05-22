@@ -188,16 +188,11 @@ These are documented because we hit them and they cost time.
    SCC carts mask the bank value to the ROM's bank count (a 128K cart →
    `value & 0xF`). Salamander writes `0x3F` which wraps to bank 15 (last
    bank, where the music driver lives) AND simultaneously enables the SCC
-   chip. The Yamanooto doesn't auto-mask.
-
-   On top of that, **openMSX 21.0** (current public release) has a known
-   bug in `Yamanooto::isSCCAccess()`: it checks `(bankRegs[2] & 0x3F)`
-   instead of `(rawBanks[2] & 0x3F)`. Fix is in master but unreleased.
-
-   Consequence: for `(0x3F + OFFR*4) & 0x3F == 0x3F` to be true,
-   `OFFR*4 mod 64 == 0` → **OFFR must be a multiple of 16** (= 512KB
-   boundary). The packager places SCC games at those positions. The real
-   hardware works either way; this alignment is also safe.
+   chip. The Yamanooto doesn't auto-mask, AND openMSX 21.0 currently
+   checks `bankRegs[2]` (the offset-adjusted value) instead of `rawBanks[2]`.
+   Consequence: SCC games must be placed at OFFR multiples of 16
+   (512KB-aligned). Full write-up in
+   [`docs/SCC_ALIGNMENT.md`](docs/SCC_ALIGNMENT.md).
 
 5. **Wrap-mirror is just 8KB**, not 512KB. For SCC games < 512K, the
    packer copies the game's last bank (8KB, where the music driver lives)
