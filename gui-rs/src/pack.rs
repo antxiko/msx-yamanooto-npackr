@@ -25,6 +25,7 @@ pub const SCC_MIRROR_TARGET: usize = 512 * 1024;
 pub const FLAG_K4: u8 = 0x01;
 pub const FLAG_MDIS: u8 = 0x02;
 pub const FLAG_ASCII16: u8 = 0x08;
+pub const FLAG_SCC_HELPER: u8 = 0x10;
 
 pub const MARQUEE_PREFIX: &[u8] =
     b"    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** ";
@@ -59,18 +60,15 @@ impl Game {
         let size = data.len();
         let (mut flags, banks, needs_wrap_mirror, data) = match mapper {
             MapperKind::Scc => {
-                // SCC patcher not yet ported. Fallback: 4× mirror to fill the
-                // 512K slot. After the mirror the cart covers all 64 banks, so
-                // the 0x3F-enable trick lands inside the cart itself — no
-                // 8KB wrap-mirror reservation needed (set needs_wrap_mirror=false).
-                let needs_mirror = size < SCC_MIRROR_TARGET;
-                let data = if needs_mirror {
-                    let copies = SCC_MIRROR_TARGET / size.max(1);
-                    let mut v = Vec::with_capacity(copies * size);
-                    for _ in 0..copies { v.extend_from_slice(&data); }
-                    v
-                } else { data };
-                (0, [0u8,1,2,3], false, data)
+                // Match the Python packager: data untouched, 8KB wrap-mirror
+                // placed at flash bank OFFR*4 + 63 (the spot the 0x3F-enable
+                // trick lands on). scc_patch + FLAG_SCC_HELPER integration is
+                // declared in main but not wired through in yamanooto_pack.py,
+                // and activating the flag triggers an unfinished helper path
+                // in launcher.bin (F1 Spirit hangs). Stay with the wrap-mirror
+                // alone for now.
+                let needs_wrap_mirror = size < SCC_MIRROR_TARGET;
+                (0, [0u8, 1, 2, 3], needs_wrap_mirror, data)
             }
             MapperKind::K5 => (0, [0,1,2,3], false, data),
             MapperKind::K4 => (FLAG_K4, [0,1,2,3], false, data),
