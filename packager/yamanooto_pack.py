@@ -92,7 +92,9 @@ SOFTDB_TO_YAMA = {
     "ASCII8SRAM2":  None,
     "KoeiSRAM32":   None,
     "GameMaster2":  None,
-    "Synthesizer":  None,
+    "Synthesizer":  MAPPER_PLAIN,  # Konami's Synthesizer (RC-741): 32K linear cart.
+                                    # The Yamanooto's FPGA emulates the DAC, so the
+                                    # cart's audio works without special handling.
     "keyboardmaster": None,
     "Page23":    None,       # 32K cart at CPU 0x8000-0xFFFF (page 2+3) — needs special trampoline
     "R-Type":    None,       # Irem-specific bankswitching
