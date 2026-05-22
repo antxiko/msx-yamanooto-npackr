@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.92 — 2026-05-22
+
+- **`pack-folder --auto-convert`**: detects ASCII8/ASCII16 ROMs and runs the
+  K5 conversion in memory automatically, so a folder full of mixed mappers
+  packs in a single command.
+- More flat mapper aliases recognized as `plain` (Normal, 0x0000, 0x4000,
+  0x8000, 8kB, 16kb, Page2, Page12, Mirrored4000).
+- Explicit "not yet supported" tagging for ASCII8 SRAM / ASCII16 SRAM /
+  KoeiSRAM / GameMaster2 / Page23 / R-Type / Cross Blaim — the packer now
+  prints a useful message instead of silently dropping.
+- New explainer doc: [`docs/SCC_ALIGNMENT.md`](docs/SCC_ALIGNMENT.md) walks
+  through the openMSX 21.0 bug and the 16-OFFR alignment math.
+
 ## v0.91 — 2026-05-22
 
 - **New: `--flash-size` option** (`2MB` or `8MB`) on `build` and `pack-folder`.
