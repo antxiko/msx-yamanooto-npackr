@@ -11,21 +11,34 @@ cartridge from your own legally-obtained Konami ROMs.
 > been scammed**. The whole point of the toolkit is that the work to build
 > it is free.
 
+## Two ways to use it
+
+**Native GUI (recommended)** — single binary for macOS / Linux / Windows.
+Download the latest [release](https://github.com/antxiko/msx-yamanooto-npackr/releases),
+launch the binary, drag-and-drop your ROMs, set a marquee + flash size, click
+**Build ROM**. No Python or other deps required.
+
+**Python CLI (historical)** — the original `packager/yamanooto_pack.py`
+still works for users who prefer scripting. It does the same job as the
+GUI, sharing the same `launcher.asm` and on-flash directory format.
+
 ## What's in here
 
 | Path | Purpose |
 | --- | --- |
-| `launcher/launcher.asm` | Z80 launcher that draws the in-cart menu and dispatches games. Assembled with [Pasmo](http://pasmo.speccy.org/). |
-| `packager/yamanooto_pack.py` | Builds the 8MB flash image (launcher + game directory + games). Auto-detects mapper by SHA1 against openMSX's `softwaredb.xml`. |
-| `packager/ascii8_to_k5.py` | Converts ASCII8 ROMs to K5 (Konami-SCC mapper addresses) so the Yamanooto can run them. |
-| `packager/ascii16_to_k5.py` | Converts ASCII16 ROMs to K5 using a small RAM helper installed by the launcher. Validated end-to-end with Golvellius (Compile, 1987). |
+| `gui-rs/` | **Rust GUI builder** (Rust + egui). Cross-platform single binary. Embeds `launcher.bin` and `softwaredb.xml`. |
+| `launcher/launcher.asm` | Z80 launcher that draws the in-cart menu and dispatches games. Assembled with [Pasmo](http://pasmo.speccy.org/). Used by both builders. |
+| `packager/yamanooto_pack.py` | Python CLI builder (alternative). Auto-detects mapper by SHA1 against openMSX's `softwaredb.xml`. |
+| `packager/ascii8_to_k5.py` | Stand-alone ASCII8 → K5 converter (the GUI does this in memory). |
+| `packager/ascii16_to_k5.py` | Stand-alone ASCII16 → K5 converter (the GUI does this in memory). |
 | `catalog/konami_catalog.toml` | Reference list of Konami MSX cartridge dumps with their mappers (informational). |
 
 ## Requirements
 
-- **Pasmo** (Z80 assembler) — `brew install pasmo` on macOS
-- **Python 3.11+** (for `tomllib`; on 3.10 install `tomli`)
-- **openMSX 21+** (optional, for testing — the Yamanooto extension is built in)
+- **GUI**: nothing — single binary in the [Releases page](https://github.com/antxiko/msx-yamanooto-npackr/releases).
+- **Python CLI** (optional): Python 3.11+ (or 3.10 with `tomli`).
+- **Pasmo** (only if you want to rebuild the launcher from source): `brew install pasmo` on macOS.
+- **openMSX 21+** (optional, for testing — the Yamanooto extension is built in).
 
 ## Quick start
 

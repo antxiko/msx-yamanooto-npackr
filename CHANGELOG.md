@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.95 — 2026-05-22
+
+- **NEW: native cross-platform GUI builder** (`gui-rs/`, Rust + egui).
+  Single static binary; drag-and-drop ROMs, mapper auto-detect against an
+  embedded `softwaredb.xml`, ASCII8/ASCII16 conversion on the fly, marquee
+  customization, splash toggle, build and save. No Python needed.
+- Pre-built binaries for **macOS** (arm64 + x64), **Linux** (x64), and
+  **Windows** (x64) attached to this release.
+- **Marquee redesign**: the anti-scam notice no longer prefixes the
+  marquee — it's already on the boot splash. The marquee is now a single
+  128-char buffer (×2 for the no-wrap display trick), fully customizable.
+- **Boot splash toggle**: new packager-rewritable config block
+  (`YMNTCFG!` magic + flag bytes) in `launcher.bin` lets the GUI checkbox
+  "Show boot splash" enable or disable the splash without recompiling.
+- The Python packager (`packager/yamanooto_pack.py`) stays as historical
+  reference / CLI alternative. Both share `launcher.asm` + `launcher.bin`
+  and use the same on-flash directory format.
+
 ## v0.94 — 2026-05-22
 
 - **`--marquee "your text"`** flag on `build` and `pack-folder` lets you
