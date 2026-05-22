@@ -772,10 +772,10 @@ msg_footer:
 ;------------------------------------------------------------------------------
 scroll_text:
     db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
-    db   "        github.com/antxiko/msx-yamanooto-npackr             *** "
+    db   "        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS         "
 SCROLL_LEN equ $ - scroll_text
     db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
-    db   "        github.com/antxiko/msx-yamanooto-npackr             *** "
+    db   "        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS         "
 msg_blank_line:
     db   "                                        ",0
 
