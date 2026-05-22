@@ -73,6 +73,29 @@ python3 packager/yamanooto_pack.py build games.toml -o yamanooto.rom
 
 You get `yamanooto.rom` (exactly 8 MB).
 
+#### Customize the scrolling marquee
+
+The bottom row of the in-cart menu scrolls a marquee. The first half is a
+hardcoded anti-scam notice (always shown). The second half is a 64-char
+buffer you can rewrite without recompiling the launcher:
+
+```sh
+python3 packager/yamanooto_pack.py pack-folder ROMs/ \
+    --marquee "Mi coleccion Konami — Yamanooto rules" \
+    -o yamanooto.rom
+```
+
+Or in the TOML:
+
+```toml
+[launcher]
+file = "launcher/launcher.bin"
+marquee = "Mi coleccion Konami — Yamanooto rules"
+```
+
+The MSX font is uppercase-only; text is uppercased automatically. Centered
+if shorter than 64 chars, truncated if longer.
+
 ### 4. Flash to the Yamanooto
 
 Per the cartridge's user manual:

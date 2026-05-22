@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.94 — 2026-05-22
+
+- **`--marquee "your text"`** flag on `build` and `pack-folder` lets you
+  customize the scrolling marquee text at the bottom of the in-cart menu
+  *without recompiling the launcher*. The hardcoded anti-scam notice
+  (`ESTA HERRAMIENTA ES GRATUITA · SI HAS PAGADO POR ESTA ROM, TE HAN
+  ESTAFADO`) is always shown; only the trailing 64-char buffer is
+  replaced. TOML config can set `[launcher].marquee = "..."` instead.
+- `launcher.bin` now reserves a 64-byte custom buffer (×2 for the no-wrap
+  trick) immediately after the anti-scam prefix. Default value points
+  users to the toolkit's GitHub repo.
+
 ## v0.93 — 2026-05-22
 
 - **ASCII8 and ASCII16 conversion validated end-to-end** in openMSX 21 with

@@ -764,11 +764,18 @@ msg_footer:
 ;------------------------------------------------------------------------------
 ; Scrolling marquee text. Stored twice so the 40-char display window never
 ; wraps the buffer; offset cycles 0..SCROLL_LEN-1.
+;
+; Layout per copy:
+;   - Anti-scam prefix (92 bytes, immutable, hardcoded here)
+;   - Custom buffer  (64 bytes, default = repo URL; the packager rewrites it
+;     when --marquee is passed). Total per copy = 156 bytes.
 ;------------------------------------------------------------------------------
 scroll_text:
-    db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    "
+    db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
+    db   "        github.com/antxiko/msx-yamanooto-npackr             *** "
 SCROLL_LEN equ $ - scroll_text
-    db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    "
+    db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
+    db   "        github.com/antxiko/msx-yamanooto-npackr             *** "
 msg_blank_line:
     db   "                                        ",0
 

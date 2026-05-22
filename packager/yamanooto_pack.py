@@ -156,6 +156,61 @@ def pad(data: bytes, size: int, fill: int = FILL_BYTE) -> bytes:
     return data + bytes([fill]) * (size - len(data))
 
 
+# --- Marquee customization ----------------------------------------------------
+# The launcher's scrolling marquee at the bottom of the menu has two parts:
+#   (1) a hardcoded anti-scam notice in launcher.asm — IMMUTABLE
+#   (2) a 64-byte custom buffer that follows it — REPLACEABLE here
+# The packager locates both copies of the buffer by searching for the
+# hardcoded prefix and overwriting the 64 bytes that follow each occurrence.
+# This lets a user customize their marquee text without recompiling the .bin.
+MARQUEE_HARDCODED_PREFIX = (
+    b"    ESTA HERRAMIENTA ES GRATUITA   ***   "
+    b"SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
+)
+MARQUEE_CUSTOM_SIZE = 64
+
+
+def _apply_marquee(launcher_bytes: bytes, custom: str | None) -> bytes:
+    """Overwrite the custom marquee buffer in both copies. No-op if custom is
+    None or empty. The MSX font is uppercase-only — text is uppercased.
+    The text is padded with spaces to exactly MARQUEE_CUSTOM_SIZE bytes
+    (centered if shorter, truncated if longer)."""
+    if not custom:
+        return launcher_bytes
+
+    custom_up = custom.upper()
+    if len(custom_up) > MARQUEE_CUSTOM_SIZE:
+        custom_up = custom_up[:MARQUEE_CUSTOM_SIZE]
+    else:
+        pad_total = MARQUEE_CUSTOM_SIZE - len(custom_up)
+        left = pad_total // 2
+        right = pad_total - left
+        custom_up = (" " * left) + custom_up + (" " * right)
+    # Best-effort ASCII encode; non-ASCII chars become "?" (still 1 byte).
+    custom_bytes = custom_up.encode("ascii", errors="replace")
+    assert len(custom_bytes) == MARQUEE_CUSTOM_SIZE
+
+    data = bytearray(launcher_bytes)
+    positions = []
+    start = 0
+    while True:
+        idx = data.find(MARQUEE_HARDCODED_PREFIX, start)
+        if idx < 0:
+            break
+        positions.append(idx)
+        start = idx + 1
+    if len(positions) != 2:
+        raise RuntimeError(
+            f"--marquee: expected 2 marquee copies in launcher.bin, found "
+            f"{len(positions)}. Is launcher.bin from a version that supports "
+            f"custom marquees? Rebuild it with pasmo."
+        )
+    for idx in positions:
+        buf = idx + len(MARQUEE_HARDCODED_PREFIX)
+        data[buf:buf + MARQUEE_CUSTOM_SIZE] = custom_bytes
+    return bytes(data)
+
+
 def round_up_to_32k(n: int) -> int:
     return (n + OFFR_UNIT - 1) & ~(OFFR_UNIT - 1)
 
@@ -429,6 +484,11 @@ def cmd_build(args):
     launcher_path = Path(cfg["launcher"]["file"])
     launcher_data = launcher_path.read_bytes()
 
+    # Custom marquee: CLI --marquee overrides; otherwise [launcher].marquee
+    # from TOML; otherwise leave the default (repo URL) baked into the .bin.
+    marquee = args.marquee if args.marquee else cfg.get("launcher", {}).get("marquee")
+    launcher_data = _apply_marquee(launcher_data, marquee)
+
     config_dir = Path(args.config).resolve().parent
     games = []
     for entry in cfg.get("games", []):
@@ -624,6 +684,7 @@ def cmd_pack_folder(args):
     launcher_path = Path(args.launcher) if args.launcher else (
         Path(__file__).resolve().parent.parent / "launcher" / "launcher.bin")
     launcher_data = launcher_path.read_bytes()
+    launcher_data = _apply_marquee(launcher_data, args.marquee)
 
     rom_paths = sorted(folder.glob("*.rom")) + sorted(folder.glob("*.ROM"))
 
@@ -733,6 +794,11 @@ def main():
                     help="How to handle <512K SCC games: auto (patch then mirror), "
                          "patch (require patch, error if none), mirror (always mirror 4x), "
                          "none (no SCC fix, music may break). Default: auto.")
+    pb.add_argument("--marquee", default=None,
+                    help="Custom text for the scrolling marquee (max 64 chars, uppercased). "
+                         "Replaces the default repo-URL portion; the anti-scam notice "
+                         "before it is always shown. Can also be set via [launcher].marquee "
+                         "in the TOML.")
     pb.set_defaults(func=cmd_build)
 
     pt = sub.add_parser("test", help="Build minimal test image with dummy entries")
@@ -757,6 +823,10 @@ def main():
     pf.add_argument("--auto-convert", action="store_true",
                     help="Automatically convert ASCII8 / ASCII16 ROMs in memory "
                          "(equivalent to running ascii8_to_k5.py / ascii16_to_k5.py).")
+    pf.add_argument("--marquee", default=None,
+                    help="Custom text for the scrolling marquee (max 64 chars, uppercased). "
+                         "Replaces the default repo-URL portion; the anti-scam notice "
+                         "before it is always shown.")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()
