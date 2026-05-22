@@ -1,50 +1,51 @@
 // MSX Yamanooto nPackR — GUI (Rust port)
 //
-// Iteration 1: skeleton UI only. No real packaging logic yet — that comes
-// in next iterations as we port:
-//   - softdb XML parsing + SHA1 detect
-//   - marquee replacement
-//   - build_image (mapper layout, OFFR alignment, wrap mirror)
-//   - ASCII8 / ASCII16 converters
-//   - SCC patcher
+// Functional features so far:
+//   - Drag-drop / file picker of ROMs
+//   - SHA1 → mapper detection via embedded openMSX softwaredb.xml
+//   - Editable title per ROM (also seeded with the canonical softdb title)
+//   - Marquee customization (max 64 chars, uppercased)
+//   - Flash size 2MB / 8MB
+//   - Build the .rom image (launcher embedded) and save via native dialog
 //
-// Reference implementation: ../packager/yamanooto_pack.py (Python, in main
-// branch). Once this Rust GUI reaches feature parity we merge to main.
+// Not yet ported from packager/yamanooto_pack.py (main branch):
+//   - ASCII8 / ASCII16 in-memory conversion (those ROMs come up "unsupported")
+//   - SCC patcher (we fall back to 4× mirror for <512K SCC games)
+
+mod mapper;
+mod pack;
+mod softdb;
 
 use eframe::egui;
+use mapper::MapperKind;
+use pack::FlashSize;
+use softdb::Softdb;
+use std::sync::OnceLock;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FlashSize {
-    Mb2,
-    Mb8,
+const SOFTDB_XML: &[u8] = include_bytes!("../data/softwaredb.xml");
+const LAUNCHER_BIN: &[u8] = include_bytes!("../data/launcher.bin");
+
+fn softdb() -> &'static Softdb {
+    static DB: OnceLock<Softdb> = OnceLock::new();
+    DB.get_or_init(|| Softdb::parse(SOFTDB_XML))
 }
 
-impl FlashSize {
-    fn label(self) -> &'static str {
-        match self {
-            FlashSize::Mb2 => "2 MB (early units)",
-            FlashSize::Mb8 => "8 MB (standard)",
-        }
-    }
-    fn bytes(self) -> usize {
-        match self {
-            FlashSize::Mb2 => 2 * 1024 * 1024,
-            FlashSize::Mb8 => 8 * 1024 * 1024,
-        }
-    }
-}
-
+#[derive(Clone)]
 struct GameEntry {
     filename: String,
     title: String,
     size: usize,
-    mapper: String,
+    mapper: Option<MapperKind>,
+    softdb_type: String,
+    data: Vec<u8>,
+    unsupported_reason: Option<String>,
 }
 
 struct App {
     marquee: String,
     flash_size: FlashSize,
     games: Vec<GameEntry>,
+    status: String,
 }
 
 impl Default for App {
@@ -53,34 +54,33 @@ impl Default for App {
             marquee: String::new(),
             flash_size: FlashSize::Mb8,
             games: Vec::new(),
+            status: String::new(),
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Accept drag-and-drop from the desktop
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter()
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        for p in dropped {
-            self.add_rom(p);
-        }
+        for p in dropped { self.add_rom(p); }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("MSX Yamanooto nPackR");
             ui.label("Build a Yamanooto flash image from your own ROMs.");
             ui.separator();
 
-            // Settings
+            // SETTINGS
             ui.group(|ui| {
-                ui.label(egui::RichText::new("SETTINGS").strong().color(egui::Color32::from_rgb(255, 204, 102)));
+                ui.label(egui::RichText::new("SETTINGS").strong()
+                    .color(egui::Color32::from_rgb(255, 204, 102)));
                 ui.horizontal(|ui| {
                     ui.label("Marquee text:");
                     ui.add(egui::TextEdit::singleline(&mut self.marquee)
-                        .hint_text("Leave empty for default repo URL")
+                        .hint_text("Leave empty for default placeholder")
                         .desired_width(f32::INFINITY));
                 });
                 ui.label(egui::RichText::new("Max 64 chars. Uppercased automatically. Anti-scam notice is always shown before it.")
@@ -88,16 +88,17 @@ impl eframe::App for App {
 
                 ui.horizontal(|ui| {
                     ui.label("Flash size:");
-                    ui.radio_value(&mut self.flash_size, FlashSize::Mb2, FlashSize::Mb2.label());
-                    ui.radio_value(&mut self.flash_size, FlashSize::Mb8, FlashSize::Mb8.label());
+                    ui.radio_value(&mut self.flash_size, FlashSize::Mb2, "2 MB (early units)");
+                    ui.radio_value(&mut self.flash_size, FlashSize::Mb8, "8 MB (standard)");
                 });
             });
 
             ui.add_space(8.0);
 
-            // ROMs panel
+            // ROMS
             ui.group(|ui| {
-                ui.label(egui::RichText::new("ROMS").strong().color(egui::Color32::from_rgb(255, 204, 102)));
+                ui.label(egui::RichText::new("ROMS").strong()
+                    .color(egui::Color32::from_rgb(255, 204, 102)));
 
                 ui.horizontal(|ui| {
                     if ui.button("Add ROM files…").clicked() {
@@ -105,9 +106,7 @@ impl eframe::App for App {
                             .add_filter("MSX ROMs", &["rom", "ROM"])
                             .pick_files()
                         {
-                            for p in paths {
-                                self.add_rom(p);
-                            }
+                            for p in paths { self.add_rom(p); }
                         }
                     }
                     if !self.games.is_empty() && ui.button("Clear").clicked() {
@@ -129,45 +128,61 @@ impl eframe::App for App {
                             ui.horizontal(|ui| {
                                 ui.add(egui::TextEdit::singleline(&mut g.title)
                                     .desired_width(280.0));
-                                ui.label(egui::RichText::new(&g.mapper)
-                                    .small().color(egui::Color32::from_rgb(255, 204, 102)));
+                                let mapper_label = g.mapper
+                                    .map(|m| m.short().to_string())
+                                    .unwrap_or_else(|| g.softdb_type.clone());
+                                let color = if g.mapper.is_some() {
+                                    egui::Color32::from_rgb(255, 204, 102)
+                                } else {
+                                    egui::Color32::from_rgb(255, 120, 120)
+                                };
+                                ui.label(egui::RichText::new(mapper_label).small().color(color));
                                 ui.label(egui::RichText::new(format!("{} KB", g.size / 1024))
                                     .small().color(egui::Color32::GRAY));
-                                if ui.small_button("✕").clicked() {
-                                    to_remove = Some(idx);
-                                }
+                                if ui.small_button("✕").clicked() { to_remove = Some(idx); }
                             });
                             ui.label(egui::RichText::new(&g.filename)
                                 .small().color(egui::Color32::DARK_GRAY));
+                            if let Some(why) = &g.unsupported_reason {
+                                ui.label(egui::RichText::new(format!("  → {}", why))
+                                    .small().color(egui::Color32::from_rgb(255, 120, 120)));
+                            }
                             ui.add_space(2.0);
                         }
                     });
-                    if let Some(idx) = to_remove {
-                        self.games.remove(idx);
-                    }
+                    if let Some(idx) = to_remove { self.games.remove(idx); }
                 }
             });
 
             ui.add_space(8.0);
 
-            // Footer
+            // FOOTER
             ui.horizontal(|ui| {
                 let total_kb: usize = self.games.iter()
+                    .filter(|g| g.mapper.is_some())
                     .map(|g| ((g.size + 32767) / 32768) * 32)
                     .sum();
                 let flash_kb = self.flash_size.bytes() / 1024;
-                ui.label(egui::RichText::new(format!("{} games · ~{} KB / {} KB flash",
-                    self.games.len(), total_kb, flash_kb))
+                let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
+                ui.label(egui::RichText::new(format!("{} supported · {} skipped · ~{} KB / {} KB",
+                    supported,
+                    self.games.len() - supported,
+                    total_kb, flash_kb))
                     .small().color(egui::Color32::GRAY));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let enabled = !self.games.is_empty();
+                    let enabled = supported > 0;
                     if ui.add_enabled(enabled, egui::Button::new("Build ROM")).clicked() {
-                        // Iteration 1: stub. Real builder lands in next iterations.
-                        eprintln!("Build clicked (not implemented yet)");
+                        self.do_build();
                     }
                 });
             });
+
+            if !self.status.is_empty() {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(&self.status)
+                    .small().color(egui::Color32::LIGHT_GRAY));
+            }
         });
     }
 }
@@ -176,30 +191,98 @@ impl App {
     fn add_rom(&mut self, path: std::path::PathBuf) {
         let filename = path.file_name()
             .and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        let size = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
-        let title = strip_known_tags(&filename);
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("Read error on {}: {}", filename, e);
+                return;
+            }
+        };
+        let size = data.len();
+        let sha1 = softdb::sha1_hex(&data);
+        let entry = softdb().lookup(&sha1);
+        let (mapper, softdb_type, suggested_title, unsupported_reason) = match entry {
+            Some(e) => {
+                let mapper = mapper::from_softdb_type(&e.mapper_type);
+                let reason = if mapper.is_none() {
+                    Some(format!("mapper '{}' not supported in this Rust port yet", e.mapper_type))
+                } else { None };
+                let mut t = e.title.clone();
+                // ASCII won't keep multi-byte; truncate carefully later.
+                if t.len() > 23 { t = e.title.chars().take(23).collect(); }
+                (mapper, e.mapper_type.clone(), t, reason)
+            }
+            None => (None, "(unknown SHA1)".into(),
+                strip_known_tags(&filename),
+                Some("SHA1 not in openMSX softdb".into())),
+        };
         self.games.push(GameEntry {
-            filename,
-            title,
-            size,
-            mapper: "?".to_string(),
+            filename, title: suggested_title, size, mapper, softdb_type, data, unsupported_reason,
         });
+    }
+
+    fn do_build(&mut self) {
+        // Convert UI rows into pack::Game
+        let mut games = Vec::new();
+        for g in &self.games {
+            let Some(mapper) = g.mapper else { continue; };
+            match pack::Game::new(g.title.clone(), g.data.clone(), mapper) {
+                Ok(pg) => games.push(pg),
+                Err(e) => {
+                    self.status = format!("Game {:?}: {}", g.title, e);
+                    return;
+                }
+            }
+        }
+
+        let marquee_opt = if self.marquee.trim().is_empty() { None } else { Some(self.marquee.trim()) };
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt);
+        let (image, dropped) = match result {
+            Ok(r) => r,
+            Err(e) => { self.status = format!("Build failed: {}", e); return; }
+        };
+
+        let default_name = format!("yamanooto-{}.rom",
+            match self.flash_size { FlashSize::Mb2 => "2mb", FlashSize::Mb8 => "8mb" });
+        let Some(save_path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("ROM image", &["rom"])
+            .save_file() else {
+            self.status = "Save cancelled.".into();
+            return;
+        };
+
+        match std::fs::write(&save_path, &image) {
+            Ok(_) => {
+                let summary = format!(
+                    "Wrote {} ({:.2} MB, {} games placed, {} dropped)",
+                    save_path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+                    image.len() as f64 / (1024.0 * 1024.0),
+                    games.len(),
+                    dropped.len()
+                );
+                self.status = if dropped.is_empty() {
+                    summary
+                } else {
+                    let names: Vec<String> = dropped.iter().map(|g| g.title.clone()).collect();
+                    format!("{} — dropped: {}", summary, names.join(", "))
+                };
+            }
+            Err(e) => self.status = format!("Write failed: {}", e),
+        }
     }
 }
 
-/// Best-effort short title from a filename. Real implementation will look up
-/// the SHA1 in openMSX's softwaredb and use the canonical title.
 fn strip_known_tags(name: &str) -> String {
     let stem = name.trim_end_matches(".ROM").trim_end_matches(".rom");
     let cut = stem.find(" (").or_else(|| stem.find(" [")).unwrap_or(stem.len());
-    let title = &stem[..cut];
-    title.trim().to_string()
+    stem[..cut].trim().to_string()
 }
 
 fn main() -> Result<(), eframe::Error> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 600.0])
+            .with_inner_size([760.0, 640.0])
             .with_min_inner_size([520.0, 400.0])
             .with_title("MSX Yamanooto nPackR"),
         ..Default::default()
