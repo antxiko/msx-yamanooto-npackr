@@ -127,7 +127,8 @@ the mapper is supported natively or whether you need a converter.
 | `0x4000` (16KB at page 1)   | Same as Mirrored  | |
 | `ASCII8`                    | Convert via `ascii8_to_k5.py` (use `mapper = "k5"` in TOML after conversion) | Rewrites `LD (nn),A` opcodes that hit the ASCII8 switch zone. Note: if a "GoodMSX" K4 dump of the same game exists, prefer that — most Konami carts dumped as ASCII8 are re-packs of an originally K4 cart. |
 | `ASCII16`                   | Convert via `ascii16_to_k5.py` (mapper = "ascii16_k5") | Installs a RAM helper at 0xF000 that the patched ROM CALLs. Validated with Golvellius. |
-| `GameMaster2`, `Synthesizer`, `keyboardmaster` | Not supported | Hardware-specific. |
+| `Synthesizer`               | Loaded as plain 32K. The Yamanooto FPGA emulates the PCM DAC on real hardware, so audio works. **openMSX gotcha:** `Yamanooto.cc` (21.0 and master) does not implement the DAC — the cart runs but stays silent in the emulator. Verify the dump in openMSX by loading it standalone with `-romtype Synthesizer`. |
+| `GameMaster2`, `keyboardmaster` | Not supported | Hardware-specific. |
 
 ### Mapper kinds in TOML
 
@@ -184,7 +185,7 @@ End-to-end tested in openMSX 21 with the `Yamanooto` mapper:
 
 **Full mega-image**: 59 of 62 Konami MSX cartridge games packed into a single
 5.3MB image (out of 8MB available); the 3 not included are unsupported
-mapper variants (Konami's Synthesizer with custom hardware, and one ASCII8
+mapper variants (one ASCII8
 Konami Game Master 2 that hasn't been converted). 2.25MB of flash spare for
 more games.
 
