@@ -1,4 +1,4 @@
-# YAMENAMI — Yamanooto MSX cartridge toolkit
+# Yamanooto nPackR
 
 Build multi-game ROM images for the [Yamanooto](https://genami.shop) MSX flash
 cartridge from your own legally-obtained Konami ROMs.
