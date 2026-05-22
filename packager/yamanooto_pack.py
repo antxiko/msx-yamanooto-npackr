@@ -163,17 +163,18 @@ def pad(data: bytes, size: int, fill: int = FILL_BYTE) -> bytes:
 
 
 # --- Marquee customization ----------------------------------------------------
-# The launcher's scrolling marquee at the bottom of the menu has two parts:
-#   (1) a hardcoded anti-scam notice in launcher.asm — IMMUTABLE
-#   (2) a 64-byte custom buffer that follows it — REPLACEABLE here
-# The packager locates both copies of the buffer by searching for the
-# hardcoded prefix and overwriting the 64 bytes that follow each occurrence.
-# This lets a user customize their marquee text without recompiling the .bin.
-MARQUEE_HARDCODED_PREFIX = (
-    b"    ESTA HERRAMIENTA ES GRATUITA   ***   "
-    b"SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
+# The launcher's scrolling marquee is a single 128-byte buffer (stored twice
+# in launcher.bin for the no-wrap display trick). The anti-scam notice now
+# only shows on the boot splash, so the marquee is fully customizable.
+# We locate both copies of the buffer by searching for the default placeholder
+# string and overwrite them in place.
+MARQUEE_ANCHOR = (
+    b"                                        "
+    b"THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS"
+    b"                                         "
 )
-MARQUEE_CUSTOM_SIZE = 64
+MARQUEE_CUSTOM_SIZE = 128
+assert len(MARQUEE_ANCHOR) == MARQUEE_CUSTOM_SIZE
 
 
 def _apply_marquee(launcher_bytes: bytes, custom: str | None) -> bytes:
@@ -200,7 +201,7 @@ def _apply_marquee(launcher_bytes: bytes, custom: str | None) -> bytes:
     positions = []
     start = 0
     while True:
-        idx = data.find(MARQUEE_HARDCODED_PREFIX, start)
+        idx = data.find(MARQUEE_ANCHOR, start)
         if idx < 0:
             break
         positions.append(idx)
@@ -212,8 +213,7 @@ def _apply_marquee(launcher_bytes: bytes, custom: str | None) -> bytes:
             f"custom marquees? Rebuild it with pasmo."
         )
     for idx in positions:
-        buf = idx + len(MARQUEE_HARDCODED_PREFIX)
-        data[buf:buf + MARQUEE_CUSTOM_SIZE] = custom_bytes
+        data[idx:idx + MARQUEE_CUSTOM_SIZE] = custom_bytes
     return bytes(data)
 
 

@@ -12,6 +12,7 @@
 //   - ASCII8 / ASCII16 in-memory conversion (those ROMs come up "unsupported")
 //   - SCC patcher (we fall back to 4× mirror for <512K SCC games)
 
+mod convert;
 mod mapper;
 mod pack;
 mod softdb;
@@ -44,6 +45,7 @@ struct GameEntry {
 struct App {
     marquee: String,
     flash_size: FlashSize,
+    show_splash: bool,
     games: Vec<GameEntry>,
     status: String,
 }
@@ -53,6 +55,7 @@ impl Default for App {
         Self {
             marquee: String::new(),
             flash_size: FlashSize::Mb8,
+            show_splash: true,
             games: Vec::new(),
             status: String::new(),
         }
@@ -91,6 +94,8 @@ impl eframe::App for App {
                     ui.radio_value(&mut self.flash_size, FlashSize::Mb2, "2 MB (early units)");
                     ui.radio_value(&mut self.flash_size, FlashSize::Mb8, "8 MB (standard)");
                 });
+
+                ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
             });
 
             ui.add_space(8.0);
@@ -191,31 +196,57 @@ impl App {
     fn add_rom(&mut self, path: std::path::PathBuf) {
         let filename = path.file_name()
             .and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        let data = match std::fs::read(&path) {
+        let raw = match std::fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
                 self.status = format!("Read error on {}: {}", filename, e);
                 return;
             }
         };
-        let size = data.len();
-        let sha1 = softdb::sha1_hex(&data);
+        let size = raw.len();
+        let sha1 = softdb::sha1_hex(&raw);
         let entry = softdb().lookup(&sha1);
-        let (mapper, softdb_type, suggested_title, unsupported_reason) = match entry {
+
+        let (mapper, softdb_type_raw, suggested_title) = match entry {
             Some(e) => {
-                let mapper = mapper::from_softdb_type(&e.mapper_type);
-                let reason = if mapper.is_none() {
-                    Some(format!("mapper '{}' not supported in this Rust port yet", e.mapper_type))
-                } else { None };
                 let mut t = e.title.clone();
-                // ASCII won't keep multi-byte; truncate carefully later.
                 if t.len() > 23 { t = e.title.chars().take(23).collect(); }
-                (mapper, e.mapper_type.clone(), t, reason)
+                (mapper::from_softdb_type(&e.mapper_type), e.mapper_type.clone(), t)
             }
-            None => (None, "(unknown SHA1)".into(),
-                strip_known_tags(&filename),
-                Some("SHA1 not in openMSX softdb".into())),
+            None => (None, "(unknown SHA1)".into(), strip_known_tags(&filename)),
         };
+
+        // Auto-convert ASCII8 / ASCII16 on the fly so they enter as K5 /
+        // ascii16_k5 mappers. Mirrors the Python pack-folder --auto-convert path.
+        let (mapper, softdb_type, data, unsupported_reason) =
+            match (mapper, softdb_type_raw.as_str()) {
+                (None, "ASCII8") => {
+                    let (patched, n) = convert::ascii8_to_k5(&raw);
+                    if n > 0 {
+                        (Some(MapperKind::K5),
+                         format!("ASCII8 → K5 ({} patches)", n),
+                         patched, None)
+                    } else {
+                        (None, softdb_type_raw, raw,
+                         Some("ASCII8 with no patchable bank writes".into()))
+                    }
+                }
+                (None, "ASCII16") => {
+                    let (patched, s0, s1) = convert::ascii16_to_k5(&raw);
+                    if s0 + s1 > 0 {
+                        (Some(MapperKind::Ascii16K5),
+                         format!("ASCII16 → K5 ({}+{} patches)", s0, s1),
+                         patched, None)
+                    } else {
+                        (None, softdb_type_raw, raw,
+                         Some("ASCII16 with no patchable bank writes".into()))
+                    }
+                }
+                (Some(m), st) => (Some(m), st.to_string(), raw, None),
+                (None, st) => (None, st.to_string(), raw,
+                    Some(format!("mapper '{}' not supported", st))),
+            };
+
         self.games.push(GameEntry {
             filename, title: suggested_title, size, mapper, softdb_type, data, unsupported_reason,
         });
@@ -236,7 +267,7 @@ impl App {
         }
 
         let marquee_opt = if self.marquee.trim().is_empty() { None } else { Some(self.marquee.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt);
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, self.show_splash);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }

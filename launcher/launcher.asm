@@ -162,7 +162,11 @@ init:
 .dir_ok:
 
     ; --- splash + initial menu ---
-    call draw_splash
+    ; Splash is shown only if cfg_splash_enable is non-zero. The packager
+    ; flips that byte (locating it via the magic anchor right before it).
+    ld   a, (cfg_splash_enable)
+    or   a
+    call nz, draw_splash
     call menu_init
 
 main_loop:
@@ -765,17 +769,15 @@ msg_footer:
 ; Scrolling marquee text. Stored twice so the 40-char display window never
 ; wraps the buffer; offset cycles 0..SCROLL_LEN-1.
 ;
-; Layout per copy:
-;   - Anti-scam prefix (92 bytes, immutable, hardcoded here)
-;   - Custom buffer  (64 bytes, default = repo URL; the packager rewrites it
-;     when --marquee is passed). Total per copy = 156 bytes.
+; The anti-scam notice already shows on the boot splash, so the marquee is
+; fully customizable: 128-byte buffer (×2 for the no-wrap trick). The
+; packager locates both copies by searching for the default placeholder
+; and overwrites them with the --marquee text.
 ;------------------------------------------------------------------------------
 scroll_text:
-    db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
-    db   "        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS         "
+    db   "                                        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS                                         "
 SCROLL_LEN equ $ - scroll_text
-    db   "    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** "
-    db   "        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS         "
+    db   "                                        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS                                         "
 msg_blank_line:
     db   "                                        ",0
 
@@ -838,6 +840,18 @@ splash_l5:
     db "TE HAN ESTAFADO.",0
 splash_prompt:
     db "Pulsa cualquier tecla...",0
+
+;==============================================================================
+; Packager-rewritable config block.
+; Located via the 8-byte magic anchor; the packager flips the bytes that
+; follow it to apply runtime tweaks without recompiling.
+;==============================================================================
+cfg_anchor:
+    db 0x59, 0x4D, 0x4E, 0x54, 0x43, 0x46, 0x47, 0x21   ; "YMNTCFG!"
+cfg_splash_enable:
+    db 1                   ; 0 = skip splash, 1 = show (default)
+cfg_reserved:
+    db 0, 0, 0, 0, 0, 0, 0 ; reserved for future toggles
 
 ;==============================================================================
 ; RAM workspace (page 3, MSX system RAM)

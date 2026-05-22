@@ -27,9 +27,15 @@ pub const FLAG_MDIS: u8 = 0x02;
 pub const FLAG_ASCII16: u8 = 0x08;
 pub const FLAG_SCC_HELPER: u8 = 0x10;
 
-pub const MARQUEE_PREFIX: &[u8] =
-    b"    ESTA HERRAMIENTA ES GRATUITA   ***   SI HAS PAGADO POR ESTA ROM, TE HAN ESTAFADO    *** ";
-pub const MARQUEE_CUSTOM_SIZE: usize = 64;
+/// Default marquee placeholder baked into launcher.bin. The packager uses
+/// this whole string as an anchor to find both no-wrap copies of the buffer.
+pub const MARQUEE_ANCHOR: &[u8] =
+    b"                                        THIS TEXT CAN BE REPLACED, PLEASE READ THE DOCS                                         ";
+pub const MARQUEE_CUSTOM_SIZE: usize = 128;
+
+/// 8-byte magic anchor for the packager-rewritable config block.
+/// The byte right after the anchor is the splash enable flag (1 = show).
+pub const CFG_ANCHOR: &[u8] = b"YMNTCFG!";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlashSize { Mb2, Mb8 }
@@ -213,7 +219,7 @@ pub fn apply_marquee(launcher: &mut Vec<u8>, custom: Option<&str>) -> Result<(),
 
     let mut positions = Vec::new();
     let mut start = 0;
-    while let Some(idx) = find_subslice(&launcher[start..], MARQUEE_PREFIX) {
+    while let Some(idx) = find_subslice(&launcher[start..], MARQUEE_ANCHOR) {
         let abs = start + idx;
         positions.push(abs);
         start = abs + 1;
@@ -222,8 +228,7 @@ pub fn apply_marquee(launcher: &mut Vec<u8>, custom: Option<&str>) -> Result<(),
         return Err(format!("expected 2 marquee copies in launcher.bin, found {}", positions.len()));
     }
     for p in positions {
-        let bufpos = p + MARQUEE_PREFIX.len();
-        launcher[bufpos..bufpos + MARQUEE_CUSTOM_SIZE].copy_from_slice(&buf);
+        launcher[p..p + MARQUEE_CUSTOM_SIZE].copy_from_slice(&buf);
     }
     Ok(())
 }
@@ -233,14 +238,28 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+pub fn apply_splash_flag(launcher: &mut [u8], show_splash: bool) -> Result<(), String> {
+    let Some(idx) = find_subslice(launcher, CFG_ANCHOR) else {
+        return Err("config anchor not found in launcher.bin".into());
+    };
+    let flag_pos = idx + CFG_ANCHOR.len();
+    if flag_pos >= launcher.len() {
+        return Err("config anchor too close to end of launcher".into());
+    }
+    launcher[flag_pos] = if show_splash { 1 } else { 0 };
+    Ok(())
+}
+
 pub fn build_image(
     launcher: &[u8],
     games: &mut Vec<Game>,
     flash: FlashSize,
     marquee: Option<&str>,
+    show_splash: bool,
 ) -> Result<(Vec<u8>, Vec<Game>), String> {
     let mut launcher = launcher.to_vec();
     apply_marquee(&mut launcher, marquee)?;
+    apply_splash_flag(&mut launcher, show_splash)?;
     if launcher.len() > LAUNCHER_SIZE {
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));
     }
