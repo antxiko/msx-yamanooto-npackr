@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.93 — 2026-05-22
+
+- **ASCII8 and ASCII16 conversion validated end-to-end** in openMSX 21 with
+  real GoodMSX dumps:
+  - ASCII8: **1942** (Capcom, 1987) — 23 patches applied, boots and plays.
+  - ASCII16: **Golvellius** (Compile, 1987) — 2 helper installs + 11 bank
+    switches patched, boots and plays.
+  - Both packed together into a single 2MB image via `pack-folder
+    --auto-convert --flash-size 2MB` in one command.
+- ASCII16 → K5 path no longer marked "experimental" in the docs.
+- Catalog of known clean GoodMSX SHA1s for ASCII8/ASCII16 dumps now
+  acknowledged in the README's "Validated games" section.
+
 ## v0.92 — 2026-05-22
 
 - **`pack-folder --auto-convert`**: detects ASCII8/ASCII16 ROMs and runs the
