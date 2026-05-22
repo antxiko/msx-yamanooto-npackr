@@ -14,10 +14,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS arm64 + x64 are both built on macos-14 (arm64 runner). The
+          # x64 target is a cross-compile; macos-13 runners are flaky and
+          # routinely hang in queues, so we avoid them.
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: yamanooto-gui-macos-arm64
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
             artifact: yamanooto-gui-macos-x64
           - os: ubuntu-latest
