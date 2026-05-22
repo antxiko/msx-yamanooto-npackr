@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.91 — 2026-05-22
+
+- **New: `--flash-size` option** (`2MB` or `8MB`) on `build` and `pack-folder`.
+  Some early Yamanooto units shipped with 2MB flash; this lets the toolkit
+  produce images sized for either model.
+- Docs cleanup: removed references to a specific ASCII8 ROM dump that was an
+  outlier (canonical Konami dumps are K4, not ASCII8). The conversion path is
+  still documented and supported.
+
 ## v0.9 — 2026-05-22
 
 First public release.
@@ -10,7 +19,7 @@ First public release.
   the mapper via SHA1 lookup against openMSX's `softwaredb.xml`
 - `build` reads a TOML config for explicit selection / per-game overrides
 - `detect` identifies one or more ROMs (mapper, size, canonical title)
-- ASCII8 → K5 converter (`ascii8_to_k5.py`) — validated with Penguin Adventure
+- ASCII8 → K5 converter (`ascii8_to_k5.py`)
 - ASCII16 → K5 converter (`ascii16_to_k5.py`, experimental)
 - SCC enable patcher (`scc_patch.py`)
 - 16-OFFR alignment for SCC games (workaround for openMSX 21.0
@@ -35,7 +44,7 @@ End-to-end tested in openMSX 21 with the `Yamanooto` mapper:
   Space Manbow, Quarth, Gryzor (Contra), Gekitotsu Pennant Race 1/2,
   King's Valley 2 (MSX1 + MSX2), Hai no Majutsushi (Mahjong 2)
 - 1 Konami SCC 512K with H.CHGE hook (Metal Gear 2: Solid Snake)
-- 1 ASCII8 conversion via patcher (Penguin Adventure ASCII8 variant)
+- ASCII8 → K5 conversion path (`ascii8_to_k5.py` + `mapper = "k5"`)
 
 A typical mega-image with 59 Konami MSX cartridge titles fits in 5.3MB of the
 8MB flash, leaving ~2.25MB spare for additional games.

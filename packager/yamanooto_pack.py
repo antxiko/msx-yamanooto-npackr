@@ -25,7 +25,11 @@ import urllib.request
 from pathlib import Path
 
 # Constants matching launcher.asm
-FLASH_SIZE       = 8 * 1024 * 1024
+# Yamanooto models exist with 2 MB or 8 MB of flash. The packager defaults to
+# 8 MB but `--flash-size` lets the user select either.
+FLASH_SIZE_8MB   = 8 * 1024 * 1024
+FLASH_SIZE_2MB   = 2 * 1024 * 1024
+FLASH_SIZE       = FLASH_SIZE_8MB   # default; can be overridden by CLI
 BANK_SIZE        = 8 * 1024        # 8 KB per Konami bank
 OFFR_UNIT        = 32 * 1024       # OFFR steps in 32 KB
 LAUNCHER_BANKS   = 4               # banks 0-3, 32 KB
@@ -38,6 +42,11 @@ DIR_ENTRY_SIZE   = 32
 DIR_MAX_ENTRIES  = (BANK_SIZE - DIR_HDR_SIZE) // DIR_ENTRY_SIZE   # 255
 GAMES_POOL_START = 0x020000        # 128 KB in, first OFFR-aligned slot after dir
 FILL_BYTE        = 0xFF            # erased flash state
+
+
+def _max_offr_units() -> int:
+    """Total OFFR units available given the current FLASH_SIZE."""
+    return FLASH_SIZE // OFFR_UNIT
 
 # Directory entry FLAGS (must match launcher.asm)
 FLAG_K4         = 0x01
@@ -253,10 +262,14 @@ def pack_games(games, *, skip_overflow=False):
     placed = []
     dropped = []
 
-    # Bitmap of occupied OFFR slots (0..255). True = occupied.
-    occupied = [False] * 256
+    # Bitmap of occupied OFFR slots, sized for current FLASH_SIZE.
+    n_slots = _max_offr_units()    # 256 (8MB) or 64 (2MB)
+    occupied = [False] * n_slots
+    # OFFR slots beyond flash size — treat as occupied so we never place there.
+    # (occupied is already sized to n_slots, so any range() up to that is fine)
     for i in range(GAMES_POOL_START // OFFR_UNIT):
-        occupied[i] = True
+        if i < n_slots:
+            occupied[i] = True
 
     # Partition games
     scc_games = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5)]
@@ -279,7 +292,7 @@ def pack_games(games, *, skip_overflow=False):
         # Find a free 16-aligned slot
         start = _align_up(GAMES_POOL_START // OFFR_UNIT, SCC_OFFR_ALIGN)
         placed_here = False
-        while start + 16 <= 256:
+        while start + 16 <= n_slots:
             # Check the OFFR units we actually need: [start..start+size_offr-1]
             # plus the mirror unit at start+15 (if needs_wrap_mirror).
             need_units = list(range(start, start + size_offr))
@@ -306,7 +319,7 @@ def pack_games(games, *, skip_overflow=False):
     for g in non_scc:
         size_offr = max(1, (len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT)
         placed_here = False
-        for start in range(256 - size_offr + 1):
+        for start in range(n_slots - size_offr + 1):
             if all(not occupied[i] for i in range(start, start + size_offr)):
                 for i in range(start, start + size_offr):
                     occupied[i] = True
@@ -374,12 +387,24 @@ def build_image(launcher: bytes, games, *, skip_overflow=False) -> tuple[bytes, 
 # -----------------------------------------------------------------------------
 # Command-line interface
 # -----------------------------------------------------------------------------
+def _apply_flash_size(arg: str):
+    global FLASH_SIZE
+    arg = arg.upper().replace(" ", "")
+    if arg in ("2MB", "2M", "2"):
+        FLASH_SIZE = FLASH_SIZE_2MB
+    elif arg in ("8MB", "8M", "8"):
+        FLASH_SIZE = FLASH_SIZE_8MB
+    else:
+        raise SystemExit(f"--flash-size must be 2MB or 8MB, got {arg!r}")
+
+
 def cmd_build(args):
     try:
         import tomllib
     except ImportError:
         import tomli as tomllib  # type: ignore
 
+    _apply_flash_size(args.flash_size)
     global _scc_strategy
     _scc_strategy = args.scc_strategy
 
@@ -577,6 +602,7 @@ def cmd_pack_folder(args):
     Unsupported ROMs are skipped with a warning. If both the original ASCII8
     ROM and its `_k5.rom` converted counterpart exist, only the converted one
     is included."""
+    _apply_flash_size(args.flash_size)
     global _scc_strategy
     _scc_strategy = args.scc_strategy
     folder = Path(args.folder)
@@ -661,6 +687,9 @@ def main():
     pb = sub.add_parser("build", help="Build full image from TOML config")
     pb.add_argument("config")
     pb.add_argument("-o", "--output", default="yamanooto.rom")
+    pb.add_argument("--flash-size", choices=("2MB", "8MB"), default="8MB",
+                    help="Target Yamanooto flash size. 8MB is the standard model; "
+                         "2MB exists for some early units. Default: 8MB.")
     pb.add_argument("--scc-strategy", choices=("auto", "patch", "mirror", "none"),
                     default="auto",
                     help="How to handle <512K SCC games: auto (patch then mirror), "
@@ -680,6 +709,9 @@ def main():
     pf.add_argument("folder", help="Folder containing .rom files")
     pf.add_argument("-o", "--output", default="yamanooto.rom")
     pf.add_argument("--launcher", help="Path to launcher.bin (defaults to launcher/launcher.bin)")
+    pf.add_argument("--flash-size", choices=("2MB", "8MB"), default="8MB",
+                    help="Target Yamanooto flash size. 8MB is the standard model; "
+                         "2MB exists for some early units. Default: 8MB.")
     pf.add_argument("--scc-strategy", choices=("auto", "patch", "mirror", "none"),
                     default="auto",
                     help="How to handle <512K SCC games. Default: auto (patch first, "

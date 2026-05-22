@@ -17,7 +17,7 @@ cartridge from your own legally-obtained Konami ROMs.
 | --- | --- |
 | `launcher/launcher.asm` | Z80 launcher that draws the in-cart menu and dispatches games. Assembled with [Pasmo](http://pasmo.speccy.org/). |
 | `packager/yamanooto_pack.py` | Builds the 8MB flash image (launcher + game directory + games). Auto-detects mapper by SHA1 against openMSX's `softwaredb.xml`. |
-| `packager/ascii8_to_k5.py` | Converts ASCII8 ROMs (e.g. some Penguin Adventure dumps) to Konami-SCC (K5) so the Yamanooto can run them. Validated working with Penguin Adventure 128K. |
+| `packager/ascii8_to_k5.py` | Converts ASCII8 ROMs to K5 (Konami-SCC mapper addresses) so the Yamanooto can run them. |
 | `packager/ascii16_to_k5.py` | Converts ASCII16 ROMs to K5 using a small RAM helper installed by the launcher. Less proven — best-effort. |
 | `catalog/konami_catalog.toml` | Reference list of Konami MSX cartridge dumps with their mappers (informational). |
 
@@ -56,12 +56,13 @@ file  = "Konami's Ping-Pong.rom"
 title = "Salamander"
 file  = "Salamander.rom"
 
-# ASCII8 games (e.g. some Penguin Adventure dumps) must be converted first:
-#   python3 packager/ascii8_to_k5.py penguin.rom penguin_k5.rom
+# ASCII8 ROMs (e.g. some MSX games dumped from ROM cards with the wrong
+# header) must be converted first:
+#   python3 packager/ascii8_to_k5.py game.rom game_k5.rom
 [[games]]
-title = "Penguin Adv (K5 patch)"
-file  = "penguin_k5.rom"
-mapper = "scc"          # converter output is K5
+title = "Some ASCII8 Game"
+file  = "game_k5.rom"
+mapper = "k5"           # converter output: K5 mapper, no SCC sound
 ```
 
 ### 3. Build the image
@@ -101,7 +102,7 @@ the mapper is supported natively or whether you need a converter.
 | `Konami` (Konami-4)         | Native K4         | Any OFFR. No mirror needed. |
 | `Mirrored` (8KB/16KB carts) | Native via K4+MDIS, bank pattern `0,0,0,0` / `0,1,0,1` | Stays its original size in flash; mirror happens in the mapper. |
 | `0x4000` (16KB at page 1)   | Same as Mirrored  | |
-| `ASCII8`                    | Convert via `ascii8_to_k5.py` (use `mapper = "k5"` in TOML after conversion) | Rewrites `LD (nn),A` opcodes that hit the ASCII8 switch zone. Validated: Penguin Adventure. Note: many "ASCII8" Penguin dumps online are re-packs; the canonical **GoodMSX dump is K4** — prefer that if available. |
+| `ASCII8`                    | Convert via `ascii8_to_k5.py` (use `mapper = "k5"` in TOML after conversion) | Rewrites `LD (nn),A` opcodes that hit the ASCII8 switch zone. Note: if a "GoodMSX" K4 dump of the same game exists, prefer that — most Konami carts dumped as ASCII8 are re-packs of an originally K4 cart. |
 | `ASCII16`                   | Convert via `ascii16_to_k5.py` (experimental, mapper = "ascii16_k5") | Installs a RAM helper at 0xF000 that the patched ROM CALLs. |
 | `GameMaster2`, `Synthesizer`, `keyboardmaster` | Not supported | Hardware-specific. |
 
@@ -151,11 +152,11 @@ Power on
 End-to-end tested in openMSX 21 with the `Yamanooto` mapper:
 
 - **Mirrored 16K**: Konami's Ping-Pong, Road Fighter, ~30 more
-- **Konami-4 (K4)**: Vampire Killer (Akumajou Dracula), Penguin Adventure, Maze of Galious, Usas, ~6 more (incl. Knightmare III - Shalom 512K)
+- **Konami-4 (K4)**: Vampire Killer (Akumajou Dracula), Penguin Adventure, Maze of Galious, Usas, Metal Gear, Firebird, Ganbare Goemon, Knightmare III - Shalom (512K)
 - **Konami-SCC (K5) small (128K)**: Salamander, Quarth, F1 Spirit, Gekitotsu Pennant Race 1/2, Gryzor, Hai no Majutsushi, King's Valley 2 (×2), Gradius 2 (SCC music validated)
 - **Konami-SCC 256K**: Parodius, Space Manbow, Gofer no Yabou (Nemesis 3)
 - **Konami-SCC 512K**: Metal Gear 2: Solid Snake (uses H.CHGE hook — warm-boot fallback path)
-- **ASCII8 → K5 conversion**: ASCII8 Penguin Adventure ROM (518 patches) using `ascii8_to_k5.py` + `mapper = "k5"`
+- **ASCII8 → K5 conversion**: validated by patching ASCII8 ROMs and loading them as K5 (`ascii8_to_k5.py` + `mapper = "k5"`). Used when a game has only ASCII8 dumps available and no K4 GoodMSX equivalent.
 
 **Full mega-image**: 59 of 62 Konami MSX cartridge games packed into a single
 5.3MB image (out of 8MB available); the 3 not included are unsupported
