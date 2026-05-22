@@ -638,6 +638,29 @@ def cmd_pack_folder(args):
     for path in rom_paths:
         data = path.read_bytes()
         yama, softdb_type, sdb_title, system = detect_mapper(data)
+        # Auto-convert ASCII8 / ASCII16 in memory if user opted in.
+        if yama is None and args.auto_convert and softdb_type in ("ASCII8", "ASCII16"):
+            if softdb_type == "ASCII8":
+                import ascii8_to_k5
+                data, patches_list = ascii8_to_k5.convert(data)
+                n_patches = len(patches_list)
+                if n_patches > 0:
+                    print(f"  [conv] ASCII8 -> K5 ({n_patches} patches): {path.name}")
+                    yama = MAPPER_K5
+                else:
+                    print(f"  [skip] ASCII8 with no patchable bank writes: {path.name}")
+                    skipped.append((path, softdb_type))
+                    continue
+            else:  # ASCII16
+                import ascii16_to_k5
+                data, seg0, seg1 = ascii16_to_k5.convert(data)
+                if (seg0 + seg1) > 0:
+                    print(f"  [conv] ASCII16 -> K5 ({seg0}+{seg1} patches): {path.name}")
+                    yama = MAPPER_ASCII16_K5
+                else:
+                    print(f"  [skip] ASCII16 with no patchable bank writes: {path.name}")
+                    skipped.append((path, softdb_type))
+                    continue
         if yama is None:
             hint = _filename_mapper_hint(path)
             if hint:
@@ -731,6 +754,9 @@ def main():
                     default="auto",
                     help="How to handle <512K SCC games. Default: auto (patch first, "
                          "fall back to mirror per-game).")
+    pf.add_argument("--auto-convert", action="store_true",
+                    help="Automatically convert ASCII8 / ASCII16 ROMs in memory "
+                         "(equivalent to running ascii8_to_k5.py / ascii16_to_k5.py).")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()
