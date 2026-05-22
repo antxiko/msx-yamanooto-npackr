@@ -76,12 +76,27 @@ SOFTDB_TO_YAMA = {
     "KonamiSCC": MAPPER_SCC,
     "Konami":    MAPPER_K4,
     "Mirrored":  MAPPER_PLAIN,
+    "Normal":    MAPPER_PLAIN,
+    "0x0000":    MAPPER_PLAIN,
     "0x4000":    MAPPER_PLAIN,
+    "0x8000":    MAPPER_PLAIN,
+    "8kB":       MAPPER_PLAIN,
+    "16kb":      MAPPER_PLAIN,
+    "Page2":     MAPPER_PLAIN,
+    "Page12":    MAPPER_PLAIN,
+    "Mirrored4000": MAPPER_PLAIN,
     "ASCII8":    None,
     "ASCII16":   None,
-    "GameMaster2":     None,
-    "Synthesizer":     None,
-    "keyboardmaster":  None,
+    "ASCII8SRAM8":  None,    # SRAM variants not yet supported
+    "ASCII16SRAM2": None,
+    "ASCII8SRAM2":  None,
+    "KoeiSRAM32":   None,
+    "GameMaster2":  None,
+    "Synthesizer":  None,
+    "keyboardmaster": None,
+    "Page23":    None,       # 32K cart at CPU 0x8000-0xFFFF (page 2+3) — needs special trampoline
+    "R-Type":    None,       # Irem-specific bankswitching
+    "Cross Blaim": None,     # game-specific
 }
 
 
