@@ -59,15 +59,18 @@ impl Game {
         let size = data.len();
         let (mut flags, banks, needs_wrap_mirror, data) = match mapper {
             MapperKind::Scc => {
+                // SCC patcher not yet ported. Fallback: 4× mirror to fill the
+                // 512K slot. After the mirror the cart covers all 64 banks, so
+                // the 0x3F-enable trick lands inside the cart itself — no
+                // 8KB wrap-mirror reservation needed (set needs_wrap_mirror=false).
                 let needs_mirror = size < SCC_MIRROR_TARGET;
-                // Force-mirror fallback (SCC patcher not yet ported).
                 let data = if needs_mirror {
                     let copies = SCC_MIRROR_TARGET / size.max(1);
                     let mut v = Vec::with_capacity(copies * size);
                     for _ in 0..copies { v.extend_from_slice(&data); }
                     v
                 } else { data };
-                (0, [0u8,1,2,3], needs_mirror, data)
+                (0, [0u8,1,2,3], false, data)
             }
             MapperKind::K5 => (0, [0,1,2,3], false, data),
             MapperKind::K4 => (FLAG_K4, [0,1,2,3], false, data),
