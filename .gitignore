@@ -1,0 +1,35 @@
+# MSX ROM dumps — NEVER commit copyrighted game data
+*.rom
+*.ROM
+*.mx1
+*.mx2
+*.dsk
+*.cas
+Juegos/
+roms/
+
+# Build artifacts
+*.sym
+*.o
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+
+# Test images / scratch files
+test_*.rom
+all_*.rom
+
+# User-specific TOML configs that reference local ROM paths
+all_*.toml
+test_*.toml
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Allow the pre-built launcher (it's our own code, not a ROM)
+!launcher/launcher.bin

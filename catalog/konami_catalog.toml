@@ -1,0 +1,689 @@
+# Yamanooto-compatible Konami MSX catalog
+# Source: openMSX softwaredb.xml (https://github.com/openMSX/openMSX)
+# Yamanooto mappings:
+#   KonamiSCC -> mapper='scc'   (CFGR.K4=0)
+#   Konami    -> mapper='k4'    (CFGR.K4=1)
+#   Mirrored  -> mapper='plain' (load as K4+MDIS, padded to 16K or 32K)
+#   0x4000    -> mapper='plain' (16K, loaded only at 0x4000-0x7FFF)
+# INCOMPATIBLE (skipped): keyboardmaster, GameMaster2, Synthesizer, ASCII16
+
+[[games]]
+title    = "Green Beret"
+year     = 1986
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "0x4000"
+sha1     = ["a6b77c5873f220c00578339761552e5ee82fab62", "3ea788262557f578b25e4e36e61c1cf9fb1155d1", "dcf79362f68853733326a22eb8fdafa17bca281e"]
+
+[[games]]
+title    = "King Kong 2"
+year     = 1986
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["fe4bd35e87dd50fddd255172129b9bec38691188", "78788073af4a1c2921fb18df7175e44c16d513d6", "99330820cf8aef8bb34d56a666accb4b1ca90e30"]
+
+[[games]]
+title    = "Penguin Adventure - Yumetairiku Adventure"
+year     = 1986
+system   = "MSX"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["d53e0c8bcd98820afe820f756af35cc97911bfe4", "fa6c059e14092d023b1f9f2df28e482f966287db", "d0706fd10e418eba2929d515cc0994f49376a63f"]
+
+[[games]]
+title    = "Vampire Killer - Akumajō Dracula"
+year     = 1986
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["5ef7d03b138a2023f6def241b671c666f97ed83b", "cb544661b6da6a35c20bfe503974f2b79a3c4550", "eb58b57f468e12c4300d3a88337e6c45e532c7d3"]
+
+[[games]]
+title    = "Firebird - Hi no Tori Hououhen"
+year     = 1987
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["612c18616bc800d9eb69b9da3cd29eca31f50c1c", "063f243d697bfe7595f396235133c05961afcbbb", "d723f2eb1c887db5448fd56be5e7c57e60d88e63"]
+
+[[games]]
+title    = "Ganbare Goemon - Samurai"
+year     = 1987
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["fd71df03b0e9f3caf701ecfc6d5232060cab3b13", "993a662586b2c27c9a8c76b628d8273e7577d1b4", "02cfc41132d518e2b9fc632ec6ad00656bd9ec92"]
+
+[[games]]
+title    = "Knightmare III - Shalom"
+year     = 1987
+system   = "MSX"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["25f5adeca8a2ddb754d25eb18cff0d84e5b003bc", "828a38535cb6246469a65f429834db8ab469d914", "240e15fb5d918aa821f226002772dc800d9f20a4"]
+
+[[games]]
+title    = "Metal Gear"
+year     = 1987
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["a52021f1b257c7c35d626d5d642134091c45e4f4", "919fa773e1f239dc90fa47e2770f3f5eca7f9bfe", "1b460026e324ab0bf5935b1be211597e3321a398"]
+
+[[games]]
+title    = "The Maze of Galious - Knightmare II"
+year     = 1987
+system   = "MSX"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["4d51d3c5036311392b173a576bc7d91dc9fed6cb", "ee60e88ae409ddd93d4259b79586dacb2e5ee372", "d94327745bbb865a394e31e150a6c77263ee95da"]
+
+[[games]]
+title    = "The Treasure Of Usas"
+year     = 1987
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["632cb0834441626d20cc113cfad2e3a7ec0e0dc7", "7fe5f17ad7e6b70dd56cad2c8bdc516a86f03207", "d7fb2ca6004c5fdf77c42a5eab102b95a9a862d7"]
+
+[[games]]
+title    = "Hai no Majutsushi - Mahjong 2"
+year     = 1989
+system   = "MSX2"
+mapper   = "k4"
+softdb_mapper = "Konami"
+sha1     = ["25022c4f5cfc805e93026fd5fda781e9a1807474", "14403ca71d287084569e6c2f4124d2712c665219", "3ff54468a5acf1ad44e85bdc993044aaa3165a63"]
+
+[[games]]
+title    = "Super Cobra"
+year     = 1983
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["a84608f1c2fe1aea1a8a586f2e335cb64bb951fc", "9fce4dde148a4a2e9cbb7731baf099d1d16e7c96", "61383444e658bdcc4df61e1e393b2516bed18106"]
+
+[[games]]
+title    = "Hyper Sports 2"
+year     = 1984
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["9002aa0b2d49a9fc323180487ff591781867a99c", "1c6b2b81552590e82d3205afbde93653fa449429", "1e92d20a5815ad0dffd50d8324fce389ca033e05"]
+
+[[games]]
+title    = "Sky Jaguar"
+year     = 1984
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["1f8334dc7459cfcf2ad132e94976015c02e51390", "e8959529a71ce9d580766dd2074b2c17cde34c2d", "5398bfcc6bf60d393755a0edc15f3b9c14180b47"]
+
+[[games]]
+title    = "Hyper Rally"
+year     = 1985
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["7dfe091e02f6c1b21bd65e44eb5052d564d0ef92", "708eef06a0b5aca90dda120877b1cc3a5172a642", "2033ea831fd887c82fd8f8a1c9491f7a5dbe0175"]
+
+[[games]]
+title    = "Konami's Boxing"
+year     = 1985
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["7adb6812f3702b93aa2b2a872722bbd40915670d", "e3ac6a3ab223f5440bca5ea696e99669dd1f626d", "9e190cf3ca52d85fd34eb5df2c0dd8490448b9a2"]
+
+[[games]]
+title    = "Pippols"
+year     = 1985
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["10e63eba7d2b10d946822f21e7fd106f5dfab632", "d621e2a2f0f924a17673f5d47f2182095074acf4", "b1e6299c4711d2f571b72f11d3b1aeb23eb99b64"]
+
+[[games]]
+title    = "Road Fighter"
+year     = 1985
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["bf4a0bab1e8eaa70a8b12cd9a81d7a90a74c9e26", "7abdf08e9c0a511b8182c502ed8c5f42778437e9", "9a5e3433c5d82f2166969162bb822a965c741ce5"]
+
+[[games]]
+title    = "Yie Ar Kung-Fu"
+year     = 1985
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["a3090a15c95334da3e0f94030eadee02b5032c0c", "8b3994ab39768f15617fb2cd9199000226b935bd", "0f81ebbd3d02796500b3f862fe1a8d584fb228d3"]
+
+[[games]]
+title    = "Yie Ar Kung-Fu II - The Emperor Yie-Gah"
+year     = 1985
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["57827f8d49369e4dbf20a968e535374d35ff1648", "609d0bac4933d1bcc877746a3e14d82c204f40e7", "78d3dc3e48724c1f570d1ee1671100cdd539ad2b"]
+
+[[games]]
+title    = "Gradius - Nemesis"
+year     = 1986
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["e31ac6520e912c27ce96431a1dfb112bf71cb7b9", "50efb7040339632cf8bddbc1d3eaae1fb2e2188f", "f0e4168ea18188fca2581526c2503223b9a28581"]
+
+[[games]]
+title    = "Twinbee"
+year     = 1986
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["d33fe18ede20da4dd3d6991a9c2995e149c8fc3f", "b813123219446f16cd10b916cc18ec4a8d7c69de", "39a91558bba92b7310455cd7513276d487de0f9d"]
+
+[[games]]
+title    = "A1 Spirit - The Way To Formula 1"
+year     = 1987
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["937464eb371c68add2236bcef91d24a8ce7c4ed1"]
+
+[[games]]
+title    = "F1-Spirit - The Way To Formula 1"
+year     = 1987
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["ff72a1788d47f9876d9fabd720f6a289fb409090", "d2bfd036c8520091375f7d0b3bb0c810e04dd9bf", "3880b064dcb851ca221ff67e435137a7cf1141f8"]
+
+[[games]]
+title    = "Gradius 2 - Nemesis 2"
+year     = 1987
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["d63e20369f98487767810a0c57603bef6a2a07e5", "6844758ff5c2c410115d4d7cf12498c42e931732", "7561f3c70c221df40f1b28209c59882ca065603d"]
+
+[[games]]
+title    = "Salamander"
+year     = 1987
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["0d459788b6c464b50cbc2436e67a2cef248e0c4a", "c1a41b603da044ab34f85dc77e86c9c2f2d86222", "0d76a069726fec7326541f75b809b8b72148ed3a"]
+
+[[games]]
+title    = "Gekitotsu Pennant Race"
+year     = 1988
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["e22a6317747903475095008d0d5ad9427ddb34af", "4690b2f6ce28e55d56ab185c573fc27a9b414468", "b8f4ee146c3cdb8f506371d001e6398ecda85251"]
+
+[[games]]
+title    = "Gofer no Yabou Episode 2 - Nemesis 3 The Eve Of Destruction"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["7393f677e0fae5fc83071c6b74756117b7d75e2d", "f416b424fb913ca067fe75279c924a20fac5c6a1", "b4788d85e67950177882ea4cf6a5fa3219f3fbd0"]
+
+[[games]]
+title    = "King's Valley 2 - The Seal Of El Giza"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["cfd872d005b7bd4cdd6e06c4c0162191f0b0415d", "f3306e6f25d111da21ce66db3404f5f48acb25a1"]
+
+[[games]]
+title    = "King's Valley 2 - The Seal Of El Giza"
+year     = 1988
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["5ec8811254dc762c6852289a08acf22954404f0d", "f25628e474035e6bf0440b274c5df04f94c49fb8", "22704b82d159d963f1192d7a81810aa2be8b6042"]
+
+[[games]]
+title    = "King's Valley 2 - The Seal Of El Giza - Edit Contest Version"
+year     = 1988
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["2e0436303648097e8e936c5467574aff5e3f1517", "376b4785cab7d60cc083f0c03bd5e8ea2fee8205"]
+
+[[games]]
+title    = "Konami Game Collection - Volume #1"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["621b8b173e079fad8da4391caa95e680e46d1f10", "d2d5c5a0731278d9e0a35997eaa64317636ab832", "0fc4ea16ae7259d561eb936d6a14e997b7f8cfc1"]
+
+[[games]]
+title    = "Konami Game Collection - Volume #2"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["9ccfdda9beb5a44843cb2adbb7cd82f19a923488", "1674e0d766d47579a8c07d5bc98cabd7b5093043", "695866bc9ba0f6ef3b6ee3c75eee70ea3e80d045"]
+
+[[games]]
+title    = "Konami Game Collection - Volume #3"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["b4c475c91e82390a1d21480a0d70fc4b0c48f49d", "51b24ab4846758a8b6dc6b15e21b0baa70c8a650", "58132c6ff44095b1598f267b2bdca432d3178ec9"]
+
+[[games]]
+title    = "Konami Game Collection - Volume #4"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["287d196973d5c5f53562e6573c20c66304c0e83f", "ce227d7932847b7f0db39ca85ea3fa0e3c22a692", "3dd7d3e6f266eb64fa70fc5f47e69dfe9e834fb7"]
+
+[[games]]
+title    = "Konami Game Collection - Volume #5"
+year     = 1988
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["23504dfbe1657006e72a4a05191c30b78da03d05"]
+
+[[games]]
+title    = "Parodius - Tako Saves Earth"
+year     = 1988
+system   = "MSX"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["2220363ae56ef707ab2471fcdb36f4816ad1d32c", "5b98b7009409710e6d3cb1daafab0af03a8eb67d", "0b02dda5316a318a7f75a811aa54200ddd7abc30"]
+
+[[games]]
+title    = "Gekitotsu Pennant Race 2"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["93b07e3cd5ae2f00b36824a74f83a3ef0d65d0d5", "dbed87a53c604f7140577d6707ca0fc8490463a6", "9b796a0f1cb735eb3ce4216d2749364ee22ac110"]
+
+[[games]]
+title    = "Go Othello"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["6da3d46fa71415962004b3b13a2bac2dd513958a", "2c4f9305d160b9a0fbc3ee4226983750ee5f1952", "461c581ebc43b47c54a6d706a03c462bf7d1ef75"]
+
+[[games]]
+title    = "Gryzor - Contra"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["90003c78975d00b1e5612fd00dffabb70d616ecd", "1302d258c952e93666ecec12429d6d2c2f841f43", "cc46a737acd729b2839ecd237d38b4a63cfb16cb"]
+
+[[games]]
+title    = "Hyper Soumen"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["2f6e0a02fcc3d368db142ac837304c18c5226e2f", "4524768e575298cee3b7eee09b3caab784ca3bb7", "e9b5b79f434b1c5bdb47f3ffece3ad42e489e20b"]
+
+[[games]]
+title    = "Konami Game Collection Special"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["f90064fe4ffed170f9e9c79196aa0b17e0bbd86b"]
+
+[[games]]
+title    = "Space Manbow"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["f6199f48ff994fc9a8e33a8581bb3bb16dd301ab", "e388e8d8546e329d2c58269d4fa026624a640f1b", "9447e50d1266b7cb96a414eaf9ee16c0f99e55f3"]
+
+[[games]]
+title    = "Title Memory"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["8ac11431e32e23919a2ea37d5b2ef472d634921a", "a031ff5aeafb7d470e810bd6cd08c92394f66295", "091d23d69f214f220f45dce9bd739bb73625734d"]
+
+[[games]]
+title    = "Tsururin-kun"
+year     = 1989
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["3f20b96149f58b86d1f0e79483d5ddf402191ec9", "0a0203d69b68e1c636fdb78934ae7fb5b4d88179", "04a564958ea71653f87a8aa51b84aa567c73a8bd"]
+
+[[games]]
+title    = "Metal Gear 2 - Solid Snake"
+year     = 1990
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["af567ea6e27912d6d5bf1c8e9bc18e9b393fd1ab", "97197fc61645ad2508b3c3428c11c00ea038bf7a", "356a936987e62967597ec64a0d35a1e8ad1aa20b"]
+
+[[games]]
+title    = "Metal Gear 2 - Solid Snake (Demo)"
+year     = 1990
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["21ac0ae7da47abf30986b479489134c79405f95d", "3a0b0bdd77a1f3a11533f5ef030370bcc90c6334", "efc3814c035ab472736e9473590c628eee5dba38"]
+
+[[games]]
+title    = "Quarth"
+year     = 1990
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["0c62591033aa4e5e6b9eeb21eb2e5e60dcd8ee8e", "29a42c2b679bac55a0318ce8c97708e402e2779b", "2312bff70c83e60d1ca0fb9ca78a50637d02771c"]
+
+[[games]]
+title    = "Quarth Demo Version"
+year     = 1990
+system   = "MSX2"
+mapper   = "scc"
+softdb_mapper = "KonamiSCC"
+sha1     = ["1ccac7caeaaa1c5a89503221b0a5eec2f34b1c91"]
+
+[[games]]
+title    = "Computer Billiards - VideoHustler"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["630aec6f93df8d1ef83c52a0bb6ec571b9c6eed4", "0d8b7fffbaccddcae324e38f7f85722ece8d5976", "fa9ae3205ac5fe8304d53d94bb8b1cb394183c3a"]
+
+[[games]]
+title    = "Crazy Train"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["bbe8df034869a06cb263255ac04374de469c00ba", "31b452ff42624c6ac1e0141d65869df1eabe5bb3", "8e6445376d1fd15cb5524786117a09ac5a832169"]
+
+[[games]]
+title    = "Frogger"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["a194b845857c8b33ef4fd5e53d7f38150b4fa4cf", "c84487e485b8739ec75e09a031f84260fb0e319c", "0a272147999e5075987e864935c84ab3def2c47d"]
+
+[[games]]
+title    = "Juno First"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["846bd4d89bd034ac5346cbc559752635ad2bda6b", "a70c6b0e90e7b8ba3e5bc06c9ae7d6af344e491f", "14de1be5de19a27919d80cdad2ceb0554a48ff02"]
+
+[[games]]
+title    = "Sparkie"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["b9c98b80216983f97e28293b576ca9be3602c1a1", "4b996bddf88605c432f73564922106a63d31f62c", "e5480a5a41ce4b8b0706632ea92d29018416dd73"]
+
+[[games]]
+title    = "Time Pilot"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["c1c5ec4042760880216f781ebd5e7174a3b0f9ca", "b3c2dc4d1c940ddb4b9e742b8f5a47ab1e2d385f", "ce45e159d52fd4dee7f508be9d08a7c719ff9839"]
+
+[[games]]
+title    = "Time Pilot (Coleco Version)"
+year     = 1983
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["818a8b3cd7b56e2321ba13a7acd82cfe3975beb5", "5e1e9000e8eef9dee2e7f769fb64673dfb9c813e"]
+
+[[games]]
+title    = "Antarctic Adventure"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["e894a38f3e2ad435cc5d17a66600e6016b5e47fb", "44deaef747c572a4550681fcccc1bbbdc46a1ffc", "292215c95c82948823eb0fbe1b081f14d6b6290d"]
+
+[[games]]
+title    = "Athletic Land"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["90bdd12d632d2e909ac5d69235ad0366f430b734", "c0476fab5ca3c69b381bb8c43efea1277d7a1b43", "866cb3ab10f17e4fb356fbd7277bbf17c4e27ebe"]
+
+[[games]]
+title    = "Cabbage Patch Kids"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["c06de0eda82e1daa3ea3cbc5eba5d884fd0ce8e8", "7b6e64511a55eed58ba04f34cf2547f7df631c33", "286094c7127bf98d53d8862427487b49132b16da"]
+
+[[games]]
+title    = "Circus Charlie"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["ae6d0efd55def94274f4cec459df8927d132675a", "83dc4599fb6706059424695c58e7dd7b3041a846", "aaa57e97a5400f329048ee80cd346d960bba681b"]
+
+[[games]]
+title    = "Comic Bakery"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["fc327d3946366ca75de0d0619eb0917a27e1bd61", "d2604a1f76cadd36ede570e23ad49b0885187e25", "8cf06f93d4e8bcf7be04ae8532f72e6eec8ba2f1"]
+
+[[games]]
+title    = "Hyper Olympic 1"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["56c4813ac549af8711b2e2e42d7db1b960c4c040", "9b55970341aaab59a73ae921c6ccf29009c1a8f0", "b6973b07a574fb0077ce39c408b47b5ecfcc3788"]
+
+[[games]]
+title    = "Hyper Olympic 2"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["cc9a82898da39e5cfeb0400006d093d3b869f28c", "be16501255617bade264dbf63dc59008e1d84ac8", "4b215e407608508e59be33973212e81a1bd25bc4"]
+
+[[games]]
+title    = "Hyper Sports 1"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["2c85b993671de612e9338d094565a4eb32a97ea0", "9cab6a793e39076e3f598aa54bffd5585ddc7e3e", "50f932b50ba7d67a7182f35314e9ace5ea7b82ff"]
+
+[[games]]
+title    = "Konami's Baseball"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["076d6f5b9f8427f6959f7a255abb4acac0dd9d0c", "da6a332dc236073286aa78582c0fccf728c86ba4", "ddfac0f89d4e0337f4c47d680422aaca458d6a45"]
+
+[[games]]
+title    = "Konami's Mahjong Dojo"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["f415e4096ff3f6a9f17bfbf02f146e44f0d5fb66", "c23c342ff5274356a2d17d18272253d14fd8ffdf"]
+
+[[games]]
+title    = "Konami's Tennis"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["5f6972e9e374753faf092409f1ee10bba5231b66", "27dc3ae8a5d6bef8532c9c210a44bbcbaad436d5", "d5f5d2850b0bfda45ba4dfff70d3fd9986399a94"]
+
+[[games]]
+title    = "Magical Tree"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["b82dc590aadc930b43db303bb3e3458e7695e3b5", "f4b58fecbcbc8cd307c34806ecece2a204c26c65", "bf5678f3c065a4507f71ed6206a63ac922ad93dd"]
+
+[[games]]
+title    = "Monkey Academy"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["8b2626f8dbbb3e97a5087b340a3f3d56c8ee84d1", "3d840685daac4960ce3a6d0850a49044bf44c607", "e61f407e51ea4411145e236272842bdb3e0743e6"]
+
+[[games]]
+title    = "Video Hustler - Konami Billiards"
+year     = 1984
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["82868a81d805fb391fce588623fc888296cbf62a", "7cd94e0051e1899ae4a5d6ebf3da4c32aa1f6911", "3b6fd6a78807e700a38f9ecb145ab2847c862f52"]
+
+[[games]]
+title    = "Hyper Sports 3"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["af4e0490c178a18a47b34831fb5e3cf8b61d34d9", "1e429b73af3d9e9ae0718d88405a7b7edd0a24f2", "3d45014accbee7c0df798a7c77771666f863dfd5"]
+
+[[games]]
+title    = "King's Valley"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["07448ffb20f260df159a19df2cae1ee5545a0aef", "0cf26bf02c5b94df118129a681a7f14add708177", "de4e210e6f757efc45e66be66b14cd6ec21b2ba7"]
+
+[[games]]
+title    = "Konami's Game Master"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["9648d43f3c25d67b9e4972f777d7b02470080d1c", "4fe90868376704336fbf45619a47ce18736ff1b2", "abce0b855d67ac10bc667e0f23ceab4a12ffeee6"]
+
+[[games]]
+title    = "Konami's Golf"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["6a3a68836a468cc761a268175c64d53c4c1c48bd", "ebf474cf35a56e03771d0b17548b59feb2df0656", "bcf72a4673c7982361db4efaf8ebc776b6539938"]
+
+[[games]]
+title    = "Konami's Ping-Pong"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["ae5b8e69732a23aee102bcd996ad06225f1b3eba", "3cce9cdf016792e531017b873e13eeb1e7c85013", "9f4ac1287b8caa286a847c86ac8601a711be2d82"]
+
+[[games]]
+title    = "Konami's Soccer"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["fd7518a6aedb51630364082c27bdfe4411adfd4c", "eaa6b787784bae1c7f648b57daa1c88cf2b1b095", "10698ea6b0423f2e858a4c28c10f39646ca5495f"]
+
+[[games]]
+title    = "Mopiranger"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["33ec3136dfb6fd44014c8bbffc8ac79c3cafe75c", "9255b2ac6d03fddf3df8880ec247dd3446e3209f", "4a185a3db81c2ce20d176d13fa5f619c6b7a170c"]
+
+[[games]]
+title    = "Pooyan"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["692a55393e8eef0800a612c01456e9cecd9c1418", "5c572daa07f588e35bfa8be1a8d64caa73bfab5a", "7f6a1ba8232d6a5a7fcb5024071f305398d52dc5"]
+
+[[games]]
+title    = "Word Processor Unit EC-701"
+year     = 1985
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["e455c4999c9e2899c59887eb29e504ad73d78e18", "4cc5be7536c11a89b5ec736a62a2b832361cd23d", "661c7261dc261e9ef2106755946f95d8b9b699b4"]
+
+[[games]]
+title    = "Knightmare - Majyo Densetsu"
+year     = 1986
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["c8ff858d239c62a859f15c2f1bf44e1d657cec13", "e568e3455c14cab8992b58c2849a745ef5b19b21", "c484f44af0ab1bcaf46ae5f14a3b38a53ee77f31"]
+
+[[games]]
+title    = "Q-Bert"
+year     = 1986
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["531a7f736d86095d791d6d0f267be66eef07949c", "d5674f0217031d4bfab9c53393c18036a9707b72", "6f1774195b8db0ba34af5e16ef94700d1714e011"]
+
+[[games]]
+title    = "The Goonies"
+year     = 1986
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["b1248f7b9d4e16a894555c51c533d3fd9a90802e", "e0fd133eb7f645238b3ec546624c2d12b8a913f9", "4624af3dea3996f70d860dfdbd1a8844b8cf43ec"]
+
+[[games]]
+title    = "Pyro-Man"
+year     = 1987
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["34809426195e9e75eab850d0ec126bb8ae5d3a6d", "d67d93d2089835e4dc9393ad609c3c7fdbaa56d9"]
+
+[[games]]
+title    = "Mikkie"
+year     = 2008
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["aeeb8ddbd385bc3aba5009676e5192d32beecf15", "31eb67d5f319062154ed911887fe1319476893e4"]
+
+[[games]]
+title    = "Tutankham"
+year     = 2008
+system   = "MSX"
+mapper   = "plain"
+softdb_mapper = "Mirrored"
+sha1     = ["d77a0208790f9563985d236d79a80d737b47f070", "ca52d26e847b23c7caeb7d516b5fca5cbd686ef3", "d59ad9f16932cc3dadb22c25e64c10a73a055056"]
+

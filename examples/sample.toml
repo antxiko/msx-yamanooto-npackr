@@ -1,0 +1,32 @@
+# Sample yamanooto-npackr config.
+#
+# Use this with:
+#   python3 packager/yamanooto_pack.py build examples/sample.toml -o output.rom
+#
+# For most users, `pack-folder` is even simpler — drop your ROMs in a folder
+# and run `pack-folder ROMs/ -o output.rom`. Use this TOML only when you want
+# to override specific titles or pick a curated subset.
+
+[launcher]
+file = "launcher/launcher.bin"
+
+# Mapper auto-detected from openMSX softwaredb via SHA1 if omitted.
+# Explicit options:
+#   "scc"        — KonamiSCC (16-OFFR aligned + 8KB wrap mirror added by packer)
+#   "k5"         — K5 mapper hw without SCC sound (e.g. ASCII8 conversion)
+#   "k4"         — Konami non-SCC
+#   "plain"      — Mirrored 8/16/32KB
+#   "ascii16_k5" — output of ascii16_to_k5.py
+
+[[games]]
+title = "Solid Snake"
+file  = "/path/to/Metal Gear 2 - Solid Snake.rom"
+
+[[games]]
+title = "Salamander"
+file  = "/path/to/Salamander.rom"
+
+# Auto-detected entry (no `mapper` field)
+[[games]]
+title = "Penguin Adventure"
+file  = "/path/to/Penguin Adventure.rom"
