@@ -26,6 +26,17 @@ use std::sync::OnceLock;
 const SOFTDB_XML: &[u8] = include_bytes!("../data/softwaredb.xml");
 const LAUNCHER_BIN: &[u8] = include_bytes!("../data/launcher.bin");
 
+// Mappers offerable as a manual per-row override. These four are pure
+// re-tags: the ROM data is packed as-is and only CFGR/bank setup differs.
+// (ASCII16K5 is intentionally excluded — it needs the ROM to be patched
+// first, which the softdb-driven auto-convert path already handles.)
+const MAPPER_CHOICES: [MapperKind; 4] = [
+    MapperKind::Scc,
+    MapperKind::K5,
+    MapperKind::K4,
+    MapperKind::Plain,
+];
+
 fn softdb() -> &'static Softdb {
     static DB: OnceLock<Softdb> = OnceLock::new();
     DB.get_or_init(|| Softdb::parse(SOFTDB_XML))
@@ -44,6 +55,7 @@ struct GameEntry {
 
 struct App {
     marquee: String,
+    title: String,
     flash_size: FlashSize,
     show_splash: bool,
     games: Vec<GameEntry>,
@@ -54,6 +66,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             marquee: String::new(),
+            title: String::new(),
             flash_size: FlashSize::Mb8,
             show_splash: true,
             games: Vec::new(),
@@ -87,6 +100,15 @@ impl eframe::App for App {
                         .desired_width(f32::INFINITY));
                 });
                 ui.label(egui::RichText::new("Max 64 chars. Uppercased automatically. Anti-scam notice is always shown before it.")
+                    .small().color(egui::Color32::GRAY));
+
+                ui.horizontal(|ui| {
+                    ui.label("Menu title: ");
+                    ui.add(egui::TextEdit::singleline(&mut self.title)
+                        .hint_text("Leave empty for default (YAMANOOTO KONAMI COLLECTION)")
+                        .desired_width(f32::INFINITY));
+                });
+                ui.label(egui::RichText::new("Max 31 chars, uppercased. The red title box auto-fits.")
                     .small().color(egui::Color32::GRAY));
 
                 ui.horizontal(|ui| {
@@ -133,15 +155,32 @@ impl eframe::App for App {
                             ui.horizontal(|ui| {
                                 ui.add(egui::TextEdit::singleline(&mut g.title)
                                     .desired_width(280.0));
-                                let mapper_label = g.mapper
+                                // Mapper is editable per row: an unknown-SHA1 or
+                                // misdetected ROM (e.g. a recent "Enhanced" hack of
+                                // a Konami-SCC game) can be forced by hand. Picking a
+                                // value marks it supported so Build stops skipping it.
+                                let selected_text = g.mapper
                                     .map(|m| m.short().to_string())
                                     .unwrap_or_else(|| g.softdb_type.clone());
-                                let color = if g.mapper.is_some() {
+                                let sel_color = if g.mapper.is_some() {
                                     egui::Color32::from_rgb(255, 204, 102)
                                 } else {
                                     egui::Color32::from_rgb(255, 120, 120)
                                 };
-                                ui.label(egui::RichText::new(mapper_label).small().color(color));
+                                egui::ComboBox::from_id_source(("mapper", idx))
+                                    .selected_text(egui::RichText::new(selected_text)
+                                        .small().color(sel_color))
+                                    .width(104.0)
+                                    .show_ui(ui, |ui| {
+                                        for opt in MAPPER_CHOICES {
+                                            if ui.selectable_label(
+                                                g.mapper == Some(opt), opt.short()).clicked()
+                                            {
+                                                g.mapper = Some(opt);
+                                                g.unsupported_reason = None;
+                                            }
+                                        }
+                                    });
                                 ui.label(egui::RichText::new(format!("{} KB", g.size / 1024))
                                     .small().color(egui::Color32::GRAY));
                                 if ui.small_button("✕").clicked() { to_remove = Some(idx); }
@@ -266,8 +305,10 @@ impl App {
             }
         }
 
-        let marquee_opt = if self.marquee.trim().is_empty() { None } else { Some(self.marquee.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, self.show_splash);
+        // Always apply the marquee field: empty -> blank marquee (not the default).
+        let marquee_opt = Some(self.marquee.trim());
+        let title_opt = if self.title.trim().is_empty() { None } else { Some(self.title.trim()) };
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }

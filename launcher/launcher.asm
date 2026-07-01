@@ -35,11 +35,30 @@ CLS     equ 0x00C3          ; clear screen (needs A=0)
 ERAFNK  equ 0x00CC          ; erase function key area
 BEEP    equ 0x00C0          ; beep
 LDIRVM  equ 0x005C          ; copy CPU mem to VRAM (HL=src, DE=dest, BC=count)
+FILVRM  equ 0x0056          ; fill VRAM (HL=addr, BC=len, A=byte)
+SETWRT  equ 0x0053          ; set VRAM write address (HL)
+WRTVRM  equ 0x004D          ; write A to VRAM (HL)
+RDVRM   equ 0x004A          ; read VRAM at HL into A
 
-LINL40  equ 0xF3AE          ; line length for SCREEN 0
+; System work-area colour vars (read by CHGMOD/INIGRP when it builds SCREEN 2)
+FORCLR  equ 0xF3E9          ; foreground colour
+BAKCLR  equ 0xF3EA          ; background colour
+BDRCLR  equ 0xF3EB          ; border colour
 
-SCROLL_VRAM equ 23*40       ; VRAM offset for row 24 (0-indexed)
-SCROLL_RATE equ 3           ; ticks between scroll advances (3 = 50ms NTSC)
+;------------------------------------------------------------------------------
+; SCREEN 2 VRAM layout (standard) + the font-blitter menu palette.
+;------------------------------------------------------------------------------
+PATBASE equ 0x0000          ; pattern generator table (3*2KB = 768 tiles)
+NAMBASE equ 0x1800          ; name table (32x24 = 768 bytes)
+COLBASE equ 0x2000          ; colour table (per 8x1: fg<<4 | bg)
+
+COL_NORMAL equ 0xF1         ; white on black
+COL_HILITE equ 0x1F         ; black on white (inverse selection bar)
+COL_RED    equ 0x81         ; medium red on black (title box)
+
+PAGE_ROW   equ 22           ; page counter row (right corner, just above marquee)
+
+SCROLL_RATE equ 1           ; frames between 1px marquee advances
 
 ;------------------------------------------------------------------------------
 ; Yamanooto registers
@@ -106,6 +125,23 @@ menu_cursor   equ RAM_BASE + 4    ; 1 byte
 entry_cache   equ RAM_BASE + 5    ; 32 bytes (DIR_ENTRY_SIZE)
 scroll_offset equ RAM_BASE + 37   ; 1 byte: position in scroll_text
 scroll_ticker equ RAM_BASE + 38   ; 1 byte: frame counter for slowdown
+rl_i          equ RAM_BASE + 39   ; 1 byte: viewport row index during list redraw
+rp_x          equ RAM_BASE + 40   ; 2 bytes: current pixel X for the font blitter
+marq_char     equ RAM_BASE + 42   ; 1 byte: marquee head char index (0..127)
+marq_fine     equ RAM_BASE + 43   ; 1 byte: marquee sub-char pixel offset (0..5)
+box_l         equ RAM_BASE + 44   ; 1 byte: title box left edge (pixel x)
+box_r         equ RAM_BASE + 45   ; 1 byte: title box right edge (pixel x)
+box_lc        equ RAM_BASE + 46   ; 1 byte: box left cell (x>>3)
+box_rc        equ RAM_BASE + 47   ; 1 byte: box right cell (x>>3)
+box_nc        equ RAM_BASE + 48   ; 1 byte: box cell count
+jump_ch       equ RAM_BASE + 49   ; 1 byte: target letter for A-Z jump
+pgbuf         equ RAM_BASE + 50   ; 14 bytes: "PAG x/y" text buffer
+
+; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
+; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
+; The menu/splash use the first 256 bytes directly (X starts at 0). 272 total.
+LINEBUF       equ 0xE100          ; 272 bytes at 0xE100-0xE20F
+MARQ_VIS      equ LINEBUF + 8     ; visible portion for the marquee (256 bytes)
 
 ;==============================================================================
 ; CARTRIDGE HEADER (0x4000)
@@ -143,16 +179,19 @@ init:
     or   c                  ; page 2 = page 1 slot
     out  (0xA8), a
 
-    ; --- screen setup (SCREEN 0, 40-column) ---
-    ld   a, 40
-    ld   (LINL40), a
-    xor  a
-    call CHGMOD             ; SCREEN 0
-    call ERAFNK
-    xor  a
-    call CLS
+    ; --- screen setup (SCREEN 2, graphics, white on black) ---
+    ld   a, 15
+    ld   (FORCLR), a        ; white text
+    ld   a, 1
+    ld   (BAKCLR), a        ; black background
+    ld   (BDRCLR), a        ; black border
+    ld   a, 2
+    call CHGMOD             ; SCREEN 2 (INIGRP builds the VDP tables)
+    call scr2_init          ; name table 0..255 x3, blank patterns, base colour
 
     ei
+
+    call play_jingle        ; Konami-style boot chime (PSG)
 
     ; --- load directory header (paged in at A000-BFFF) ---
     call dir_page_in
@@ -170,8 +209,10 @@ init:
     call menu_init
 
 main_loop:
+    halt                    ; one frame tick
+    call scroll_tick        ; keep the marquee moving every frame (even during nav)
     call CHSNS              ; Z=1 if no key in buffer
-    jr   z, main_no_key
+    jr   z, main_loop
     call CHGET
     cp   28
     jp   z, menu_next_page
@@ -185,11 +226,7 @@ main_loop:
     jp   z, do_launch
     cp   ' '
     jp   z, do_launch
-    jp   main_loop
-
-main_no_key:
-    call scroll_tick
-    halt                    ; wait for VBlank (slows scroll naturally)
+    call menu_jump_letter   ; A = key; jumps if it's a letter, else no-op
     jp   main_loop
 
 do_launch:
@@ -201,14 +238,15 @@ do_launch:
 ;==============================================================================
 fatal_no_dir:
     ld   hl, msg_no_dir
-    call print_string
+    ld   a, 20
+    ld   b, 10
+    call blit_line_at
 fatal_halt:
     halt
     jr   fatal_halt
 
 msg_no_dir:
-    db   "Directory not found.",13,10
-    db   "Flash needs repackaging.",13,10,0
+    db   "NO DIRECTORY - REPACK FLASH",0
 
 ;==============================================================================
 ; DIRECTORY ACCESS
@@ -278,9 +316,15 @@ dir_get_entry_done:
 ;   menu_top      (2B)  index of first entry shown
 ;   menu_cursor   (1B)  row in viewport (0..VIEW_ROWS-1)
 ;==============================================================================
-VIEW_ROWS    equ 18         ; rows visible in the list
-VIEW_TOP_ROW equ 4          ; first row of the list (1-based)
-VIEW_COL     equ 3          ; column of game names (1-based, leave col 1-2 for cursor)
+VIEW_ROWS    equ 19         ; game rows visible in the list
+LIST_TOP     equ 3          ; first text row of the list (rows 0-2 = boxed title)
+TITLE_ROW    equ 1          ; title row (inside the box)
+MARQ_ROW     equ 23         ; marquee row (bottom, 0-based)
+NAME_X       equ 8          ; start pixel X for game names
+
+; Red title-box geometry (pixels). Box frames the title across rows 0-2.
+BOX_TOP_Y    equ 4          ; top edge scanline
+BOX_BOT_Y    equ 19         ; bottom edge scanline
 
 menu_init:
     call dir_get_count
@@ -293,153 +337,139 @@ menu_init:
     ret
 
 menu_redraw_full:
-    ; Header
-    ld   h, 1
-    ld   l, 1
-    call POSIT
-    ld   hl, msg_title
-    call print_string
-
-    ld   h, 1
-    ld   l, 2
-    call POSIT
-    ld   hl, msg_dashes
-    call print_string
-
+    call draw_title_box
     call menu_redraw_list
     call menu_redraw_footer
     ret
 
 menu_redraw_footer:
-    ; Footer is now a scrolling marquee — initial draw at offset 0.
-    xor  a
-    ld   (scroll_offset), a
+    xor  a                  ; reset marquee to the start of the buffer
+    ld   (marq_char), a
+    ld   (marq_fine), a
     ld   (scroll_ticker), a
-    jp   scroll_redraw
+    jp   marquee_render     ; initial draw
 
-;------------------------------------------------------------------------------
-; Marquee scroll at row 24.
-; Uses LDIRVM to write 40 chars to VRAM without moving BIOS cursor (no scroll).
-;------------------------------------------------------------------------------
-scroll_redraw:
-    ld   a, (scroll_offset)
-    ld   d, 0
-    ld   e, a
-    ld   hl, scroll_text
-    add  hl, de
-    ld   de, SCROLL_VRAM
-    ld   bc, 40
-    call LDIRVM
-    ret
-
+; scroll_tick — advance the marquee one pixel every SCROLL_RATE frames, redraw.
 scroll_tick:
     ld   a, (scroll_ticker)
     inc  a
+    ld   (scroll_ticker), a
     cp   SCROLL_RATE
-    jr   nc, scroll_advance
-    ld   (scroll_ticker), a
-    ret
-scroll_advance:
+    ret  c                  ; not time to advance yet
     xor  a
     ld   (scroll_ticker), a
-    ld   a, (scroll_offset)
+    ld   a, (marq_fine)
+    add  a, 2               ; advance 2 px per tick (faster scroll)
+    cp   6
+    jr   c, st_finestore
+    sub  6                  ; wrapped: keep remainder, advance the head char
+    ld   (marq_fine), a
+    ld   a, (marq_char)
     inc  a
-    cp   SCROLL_LEN
-    jr   c, scroll_offset_ok
+    cp   128
+    jr   c, st_charstore
     xor  a
-scroll_offset_ok:
-    ld   (scroll_offset), a
-    jp   scroll_redraw
+st_charstore:
+    ld   (marq_char), a
+    jp   marquee_render
+st_finestore:
+    ld   (marq_fine), a
+    jp   marquee_render
 
 menu_redraw_list:
-    ld   b, VIEW_ROWS       ; rows remaining
-    ld   c, 0               ; row index 0..VIEW_ROWS-1
-    ld   hl, (menu_top)     ; entry index
-menu_redraw_loop:
-    push bc
-    push hl
-    ; clear line first
-    ld   a, VIEW_TOP_ROW
-    add  a, c
-    ld   l, a
-    ld   h, 1
-    call POSIT
-    ld   hl, msg_blank_line
-    call print_string
-    pop  hl
-    push hl
+    xor  a
+    ld   (rl_i), a
+menu_rl_loop:
+    call menu_draw_row
+    ld   a, (rl_i)
+    inc  a
+    ld   (rl_i), a
+    cp   VIEW_ROWS
+    jr   c, menu_rl_loop
+    jp   draw_page_indicator
 
-    ; check if entry index < count
-    ex   de, hl
+; menu_draw_row — draw the single viewport row whose index is in rl_i.
+; Renders the entry name (if valid), flushes it, colours the row normal, and
+; overlays the inverse title bar when this row is the cursor row. Cheap enough
+; to call twice per cursor move (old + new) so the marquee never stalls.
+menu_draw_row:
+    call clear_linebuf
+    ld   hl, (menu_top)
+    ld   a, (rl_i)
+    ld   e, a
+    ld   d, 0
+    add  hl, de           ; hl = entry index
+    ex   de, hl           ; de = entry index
     ld   hl, (menu_count)
     or   a
-    sbc  hl, de
-    jr   z, menu_redraw_skip
-    jr   c, menu_redraw_skip
-    ex   de, hl             ; restore HL = entry index
+    sbc  hl, de           ; count - index
+    jr   z, mdr_empty
+    jr   c, mdr_empty
+    ld   b, d
+    ld   c, e             ; bc = entry index
+    call dir_get_entry    ; hl = entry ptr (name at +0)
+    ld   a, NAME_X
+    call render_str_prop  ; -> LINEBUF, leaves rp_x = title end pixel
+mdr_empty:
+    ld   a, (rl_i)
+    add  a, LIST_TOP
+    ld   b, a
+    call flush_row_pat
+    ld   a, (rl_i)
+    add  a, LIST_TOP
+    ld   b, a
+    ld   a, COL_NORMAL
+    call set_row_color
+    ld   a, (rl_i)
+    ld   hl, menu_cursor
+    cp   (hl)
+    ret  nz
+    jp   hilite_title     ; cursor row: overlay the bar on the title cells
 
-    push bc
-    ld   b, h
-    ld   c, l
-    call dir_get_entry      ; HL = pointer to entry
-    pop  bc
-    push hl
-    ; position cursor at name column
-    ld   a, VIEW_TOP_ROW
-    add  a, c
-    ld   l, a
-    ld   h, VIEW_COL
-    call POSIT
-    pop  hl                 ; HL = entry ptr
-    call print_string_max24
-    jr   menu_redraw_next
-menu_redraw_skip:
-menu_redraw_next:
-    pop  hl
-    inc  hl
-    pop  bc
-    inc  c
-    djnz menu_redraw_loop
-
-    call menu_draw_cursor
-    ret
-
-menu_draw_cursor:
-    ld   a, (menu_cursor)
-    add  a, VIEW_TOP_ROW
-    ld   l, a
-    ld   h, 1
-    call POSIT
-    ld   a, '>'
-    call CHPUT
-    ret
-
-menu_clear_cursor:
-    ld   a, (menu_cursor)
-    add  a, VIEW_TOP_ROW
-    ld   l, a
-    ld   h, 1
-    call POSIT
-    ld   a, ' '
-    call CHPUT
+; Overlay the inverse selection bar on just the title cells of the cursor row.
+; Uses rl_i (viewport row) and rp_x (title end pixel from the last render).
+hilite_title:
+    ld   a, (rl_i)
+    add  a, LIST_TOP
+    ld   h, a
+    ld   l, 0               ; HL = row*256
+    ld   de, COLBASE + 8    ; colour base + first title cell (NAME_X=8 -> cell 1)
+    add  hl, de
+    ld   a, (rp_x)          ; title end pixel (low byte; titles < 256)
+    dec  a
+    rrca
+    rrca
+    rrca
+    and  0x1F               ; last title cell index
+    sub  1                  ; minus first cell (NAME_X>>3 = 1)
+    inc  a                  ; -> cell count
+    add  a, a
+    add  a, a
+    add  a, a               ; * 8 bytes per cell
+    ld   c, a
+    ld   b, 0
+    ld   a, COL_HILITE
+    call FILVRM
     ret
 
 menu_cursor_up:
     ld   a, (menu_cursor)
     or   a
     jr   z, menu_prev_page
-    call menu_clear_cursor
-    ld   a, (menu_cursor)
+    ld   (rl_i), a          ; rl_i = old cursor row
     dec  a
-    ld   (menu_cursor), a
-    call menu_draw_cursor
+    ld   (menu_cursor), a   ; cursor moves up
+    call menu_draw_row      ; old row: rl_i != cursor -> normal (bar cleared)
+    ld   a, (menu_cursor)
+    ld   (rl_i), a
+    call menu_draw_row      ; new row: rl_i == cursor -> hilited
     jp   main_loop
 
 menu_cursor_down:
     ld   a, (menu_cursor)
     cp   VIEW_ROWS-1
     jr   z, menu_next_page
-    ; also check if we'd exceed entry count
+    ; don't move the cursor past the last entry
     ld   b, a
     inc  b
     ld   hl, (menu_top)
@@ -452,11 +482,14 @@ menu_cursor_down:
     sbc  hl, de
     jr   c, menu_down_nop
     jr   z, menu_down_nop
-    call menu_clear_cursor
     ld   a, (menu_cursor)
+    ld   (rl_i), a          ; old cursor row
     inc  a
-    ld   (menu_cursor), a
-    call menu_draw_cursor
+    ld   (menu_cursor), a   ; cursor moves down
+    call menu_draw_row      ; old row -> normal
+    ld   a, (menu_cursor)
+    ld   (rl_i), a
+    call menu_draw_row      ; new row -> hilited
 menu_down_nop:
     jp   main_loop
 
@@ -506,6 +539,156 @@ menu_get_selected:
     ld   b, h
     ld   c, l
     call dir_get_entry
+    ret
+
+;------------------------------------------------------------------------------
+; menu_jump_letter — jump the cursor to the first game whose name starts with
+; the letter in A (A-Z, case-insensitive). No-op for non-letter keys.
+;------------------------------------------------------------------------------
+menu_jump_letter:
+    cp   0x61
+    jr   c, mjl_up
+    cp   0x7B
+    jr   nc, mjl_up
+    sub  0x20               ; uppercase the pressed key
+mjl_up:
+    cp   'A'
+    ret  c
+    cp   'Z' + 1
+    ret  nc
+    ld   (jump_ch), a
+    ld   hl, 0              ; index = 0
+mjl_scan:
+    ex   de, hl            ; de = index
+    ld   hl, (menu_count)
+    or   a
+    sbc  hl, de           ; count - index
+    ret  z                ; scanned all -> no match
+    ret  c
+    ex   de, hl           ; hl = index
+    ld   b, h
+    ld   c, l             ; bc = index
+    push hl
+    call dir_get_entry    ; hl = entry ptr (name at +0)
+    ld   a, (hl)          ; first character of the name
+    cp   0x61
+    jr   c, mjl_cu
+    cp   0x7B
+    jr   nc, mjl_cu
+    sub  0x20             ; uppercase it
+mjl_cu:
+    ld   hl, jump_ch
+    cp   (hl)
+    pop  hl               ; hl = index
+    jr   z, mjl_found
+    inc  hl
+    jr   mjl_scan
+mjl_found:
+    ld   (menu_top), hl   ; put the match at the top of the viewport
+    xor  a
+    ld   (menu_cursor), a
+    jp   menu_redraw_list
+
+;------------------------------------------------------------------------------
+; draw_page_indicator — "x/y" (page/total) in the bottom-right corner, sharing
+; row 23 with the marquee (which only flushes the left cells). Redrawn from
+; menu_redraw_list, i.e. only when the page/view changes.
+;------------------------------------------------------------------------------
+draw_page_indicator:
+    ld   de, pgbuf
+    ld   a, 'P'
+    ld   (de), a
+    inc  de
+    ld   a, 'A'
+    ld   (de), a
+    inc  de
+    ld   a, 'G'
+    ld   (de), a
+    inc  de
+    ld   a, ' '
+    ld   (de), a
+    inc  de
+    ld   hl, (menu_top)     ; current page = menu_top / VIEW_ROWS + 1
+    call udiv_hl_vr
+    inc  a
+    call put_u8
+    ld   a, '/'
+    ld   (de), a
+    inc  de
+    ld   hl, (menu_count)   ; total = (count - 1) / VIEW_ROWS + 1
+    dec  hl
+    call udiv_hl_vr
+    inc  a
+    call put_u8
+    xor  a
+    ld   (de), a            ; NUL terminate
+    ; right-align on PAGE_ROW (its own row, above the marquee)
+    ld   hl, pgbuf
+    call str_width_px       ; A = width
+    ld   b, a
+    ld   a, 254
+    sub  b                  ; X = 254 - width (2px right margin)
+    ld   b, PAGE_ROW
+    ld   hl, pgbuf
+    jp   blit_line_at
+
+; udiv_hl_vr — A = HL / VIEW_ROWS (quotient). Preserves DE. Destroys HL, B.
+udiv_hl_vr:
+    push de
+    ld   b, 0
+udv_loop:
+    ld   a, h
+    or   a
+    jr   nz, udv_sub        ; H != 0 -> HL >= VIEW_ROWS (VIEW_ROWS < 256)
+    ld   a, l
+    cp   VIEW_ROWS
+    jr   c, udv_done
+udv_sub:
+    ld   de, VIEW_ROWS
+    or   a
+    sbc  hl, de
+    inc  b
+    jr   udv_loop
+udv_done:
+    pop  de
+    ld   a, b
+    ret
+
+; put_u8 — write A (0-255) as decimal to (DE), no leading zeros, advance DE.
+put_u8:
+    ld   c, 0               ; "already printed a digit" flag
+    ld   b, 100
+    call pu_digit
+    ld   b, 10
+    call pu_digit
+    add  a, '0'             ; ones digit (always printed)
+    ld   (de), a
+    inc  de
+    ret
+pu_digit:
+    ld   l, 0
+pu_d1:
+    cp   b
+    jr   c, pu_d2
+    sub  b
+    inc  l
+    jr   pu_d1
+pu_d2:
+    push af
+    ld   a, l
+    or   a
+    jr   nz, pu_print       ; nonzero digit -> print
+    ld   a, c
+    or   a
+    jr   z, pu_skip         ; leading zero -> skip
+pu_print:
+    ld   a, l
+    add  a, '0'
+    ld   (de), a
+    inc  de
+    ld   c, 1
+pu_skip:
+    pop  af
     ret
 
 ;==============================================================================
@@ -756,10 +939,542 @@ print_str_max_loop:
     ret
 
 ;==============================================================================
+; SCREEN 2 FONT BLITTER (proportional, 6px advance, via a RAM line buffer)
+;==============================================================================
+
+; scr2_init — after CHGMOD 2: name table = 0,1,..,255 (x3 thirds), blank
+; patterns, base colour white-on-black everywhere.
+scr2_init:
+    ld   hl, NAMBASE
+    call SETWRT
+    ld   c, 3               ; three thirds of the screen
+scr2_nt_third:
+    xor  a
+scr2_nt_byte:
+    out  (0x98), a
+    inc  a
+    jr   nz, scr2_nt_byte   ; write 0..255, then A wraps to 0 -> next third
+    dec  c
+    jr   nz, scr2_nt_third
+    ld   hl, PATBASE
+    ld   bc, 0x1800
+    xor  a
+    call FILVRM             ; blank all patterns (6144 bytes)
+    ld   hl, COLBASE
+    ld   bc, 0x1800
+    ld   a, COL_NORMAL
+    call FILVRM             ; white on black everywhere
+    ret
+
+; clear_linebuf — zero the 264-byte line buffer. Preserves all registers.
+clear_linebuf:
+    push af
+    push bc
+    push de
+    push hl
+    ld   hl, LINEBUF
+    ld   de, LINEBUF + 1
+    ld   bc, 271
+    ld   (hl), 0
+    ldir
+    pop  hl
+    pop  de
+    pop  bc
+    pop  af
+    ret
+
+; blit_line_at — draw a whole text line. In: HL=asciiz, A=start pixel X, B=row.
+blit_line_at:
+    call clear_linebuf      ; (preserves regs)
+    push bc                 ; save row
+    call render_str_prop    ; A=startX, HL=string -> LINEBUF
+    pop  bc                 ; B=row
+    push bc                 ; flush_row_pat does ld bc,256 -> keep the row
+    call flush_row_pat      ; LINEBUF -> VRAM pattern row
+    pop  bc                 ; B=row
+    ld   a, COL_NORMAL
+    call set_row_color
+    ret
+
+; blit_center — draw a string horizontally centred on the 256px row.
+; In: HL=asciiz, B=row.
+blit_center:
+    push hl                 ; measure length -> C
+    ld   c, 0
+bcen_len:
+    ld   a, (hl)
+    or   a
+    jr   z, bcen_done
+    inc  hl
+    inc  c
+    jr   bcen_len
+bcen_done:
+    pop  hl
+    ld   a, c               ; width = c*6
+    add  a, a
+    ld   d, a               ; 2c
+    add  a, a               ; 4c
+    add  a, d               ; 6c
+    neg                     ; A = 256 - width (mod 256)
+    srl  a                  ; X = (256 - width) / 2
+    jp   blit_line_at       ; A=X, B=row, HL=string
+
+; render_str_prop — render ASCIIZ into LINEBUF (must be pre-cleared).
+; In: HL=string, A=start pixel X. Stops at NUL or right edge.
+render_str_prop:
+    push hl                 ; save string ptr
+    ld   l, a
+    ld   h, 0
+    ld   (rp_x), hl         ; rp_x = start pixel X (16-bit)
+    pop  hl
+rsp_loop:
+    ld   a, (hl)
+    or   a
+    ret  z
+    ld   a, (rp_x)          ; low byte (menu/splash X stays < 256)
+    cp   251                ; room for one more 6px glyph?
+    ret  nc
+    ld   a, (hl)            ; char
+    push hl
+    call render_char_prop
+    pop  hl
+    inc  hl
+    jr   rsp_loop
+
+; render_char_prop — blit one glyph into LINEBUF at pixel rp_x (16-bit),
+; advance rp_x by 6. In: A = character. Auto-uppercases a..z; oob -> space.
+render_char_prop:
+    cp   0x61
+    jr   c, rcp_nolow
+    cp   0x7B
+    jr   nc, rcp_nolow
+    sub  0x20               ; a..z -> A..Z
+rcp_nolow:
+    sub  0x20               ; index = char - 0x20
+    jr   c, rcp_space
+    cp   64
+    jr   c, rcp_ok
+rcp_space:
+    xor  a                  ; glyph 0 = space
+rcp_ok:
+    push iy
+    ; dest cell -> IY = LINEBUF + (rp_x>>3)*8 ; B = shift (rp_x & 7)
+    ld   hl, (rp_x)         ; HL = pixel X (16-bit)
+    ld   c, a               ; stash glyph index
+    ld   a, l
+    and  7
+    ld   b, a               ; B = shift
+    srl  h
+    rr   l
+    srl  h
+    rr   l
+    srl  h
+    rr   l                  ; HL = cell (rp_x>>3)
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl             ; HL = cell*8
+    ld   de, LINEBUF
+    add  hl, de
+    push hl
+    pop  iy                 ; IY = &LINEBUF[cell*8]
+    ; src -> HL = font + index*8
+    ld   l, c
+    ld   h, 0
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl             ; index*8
+    ld   de, font
+    add  hl, de             ; HL = glyph source
+    ld   c, 8               ; 8 pixel rows
+rcp_rows:
+    ld   a, (hl)            ; glyph row byte
+    inc  hl
+    ld   d, a
+    ld   e, 0               ; DE = g<<8
+    ld   a, b
+    or   a
+    jr   z, rcp_noshift
+    push bc
+    ld   b, a
+rcp_sh:
+    srl  d
+    rr   e
+    djnz rcp_sh
+    pop  bc
+rcp_noshift:
+    ld   a, (iy+0)
+    or   d
+    ld   (iy+0), a          ; hi part into this cell
+    ld   a, (iy+8)
+    or   e
+    ld   (iy+8), a          ; lo part into next cell
+    inc  iy
+    dec  c
+    jr   nz, rcp_rows
+    pop  iy
+    ld   hl, (rp_x)         ; advance X by 6 (16-bit)
+    inc  hl
+    inc  hl
+    inc  hl
+    inc  hl
+    inc  hl
+    inc  hl
+    ld   (rp_x), hl
+    ret
+
+; flush_row_pat — LINEBUF (256 bytes) -> pattern row. In: B = text row.
+flush_row_pat:
+    ld   h, b
+    ld   l, 0               ; HL = row*256
+    ex   de, hl             ; DE = VRAM dest (PATBASE=0)
+    ld   hl, LINEBUF
+    ld   bc, 256
+    call LDIRVM
+    ret
+
+; set_row_color — fill a text row's colour cells. In: B = row, A = colour.
+set_row_color:
+    push af
+    ld   h, b
+    ld   l, 0
+    ld   de, COLBASE
+    add  hl, de             ; HL = COLBASE + row*256
+    ld   bc, 256
+    pop  af
+    call FILVRM
+    ret
+
+;------------------------------------------------------------------------------
+; MARQUEE — pixel-smooth bottom scroll.
+; State: marq_char (head char 0..127) + marq_fine (0..5 pixel offset). The
+; 128-byte customizable buffer is stored twice back-to-back (scroll_text and
+; its copy) so ~43 chars can be read from any head index without wrapping.
+; The head char is drawn at physical X = 8 - fine; the 8-byte guard cell it
+; spills into is never blitted, giving a clean left-edge clip.
+;------------------------------------------------------------------------------
+marquee_render:
+    call clear_linebuf
+    ld   a, 8
+    ld   hl, marq_fine
+    sub  (hl)               ; A = 8 - fine (first char physical X, 3..8)
+    ld   l, a
+    ld   h, 0
+    ld   (rp_x), hl
+    ld   a, (marq_char)
+    ld   e, a
+    ld   d, 0
+    ld   hl, scroll_text
+    add  hl, de             ; HL = &scroll_text[marq_char]
+mr_loop:
+    push hl
+    ld   hl, (rp_x)
+    ld   de, 264
+    or   a
+    sbc  hl, de
+    pop  hl
+    jr   nc, mr_done        ; rp_x >= 264 -> visible row filled
+    ld   a, (hl)
+    push hl
+    call render_char_prop
+    pop  hl
+    inc  hl
+    jr   mr_loop
+mr_done:
+    ld   b, MARQ_ROW
+    ; fall through to flush_marq
+
+; flush_marq — copy the 256 visible bytes (LINEBUF+8) to pattern row B.
+flush_marq:
+    ld   h, b
+    ld   l, 0               ; HL = row*256
+    ex   de, hl             ; DE = VRAM dest
+    ld   hl, MARQ_VIS       ; skip the 8-byte left guard
+    ld   bc, 256            ; full-width marquee (counter is on its own row)
+    call LDIRVM
+    ret
+
+;==============================================================================
+; TITLE + RED ROUNDED BOX
+;------------------------------------------------------------------------------
+; Renders the centred title on TITLE_ROW and frames it with a red rectangle
+; whose four corner pixels are left blank (rounded look).
+;==============================================================================
+draw_title_box:
+    ld   hl, msg_title
+    call str_width_px       ; A = title width in pixels
+    ld   b, a               ; B = width
+    neg
+    srl  a
+    ld   c, a               ; C = x_start = (256 - width) / 2
+    ; box_l = x_start - 8 ; box_r = x_start + width + 6
+    ld   a, c
+    sub  8
+    ld   (box_l), a
+    ld   a, c
+    add  a, b
+    add  a, 6
+    ld   (box_r), a
+    ; render the centred title
+    ld   hl, msg_title
+    ld   a, c               ; X = x_start
+    ld   b, TITLE_ROW
+    call blit_line_at
+    call draw_box_edges
+    jp   colour_box_red
+
+; str_width_px — HL=asciiz -> A = length*6 (assumes < 256). Clobbers HL.
+str_width_px:
+    ld   c, 0
+swpx_loop:
+    ld   a, (hl)
+    or   a
+    jr   z, swpx_done
+    inc  hl
+    inc  c
+    jr   swpx_loop
+swpx_done:
+    ld   a, c
+    add  a, a
+    ld   b, a               ; 2c
+    add  a, a               ; 4c
+    add  a, b               ; 6c
+    ret
+
+; vpset — set one pixel in the pattern table. In: D=x (0..255), E=y (0..191).
+vpset:
+    ld   a, e
+    rrca
+    rrca
+    rrca
+    and  0x1F
+    ld   h, a               ; H = y>>3
+    ld   a, d
+    and  0xF8
+    ld   l, a               ; L = (x>>3)*8
+    ld   a, e
+    and  0x07
+    add  a, l
+    ld   l, a               ; L += y&7  -> HL = pattern byte address
+    ld   a, d
+    and  0x07
+    ld   b, a
+    ld   c, 0x80
+    inc  b
+vps_rot:
+    dec  b
+    jr   z, vps_set
+    srl  c
+    jr   vps_rot
+vps_set:
+    push bc                 ; keep the bit mask across RDVRM
+    call RDVRM              ; A = VRAM(HL)
+    pop  bc
+    or   c
+    call WRTVRM             ; VRAM(HL) = A | mask
+    ret
+
+; hline — plot pixels x=C..B at y=E.
+hline:
+hln_loop:
+    push bc
+    push de
+    ld   d, c
+    call vpset
+    pop  de
+    pop  bc
+    ld   a, c
+    cp   b
+    ret  z
+    inc  c
+    jr   hln_loop
+
+; vline — plot pixels y=C..B at x=D.
+vline:
+vln_loop:
+    push bc
+    push de
+    ld   e, c
+    call vpset
+    pop  de
+    pop  bc
+    ld   a, c
+    cp   b
+    ret  z
+    inc  c
+    jr   vln_loop
+
+; draw_box_edges — the four red edges, corners left 1px short (rounded).
+draw_box_edges:
+    ld   a, (box_l)
+    inc  a
+    ld   c, a
+    ld   a, (box_r)
+    dec  a
+    ld   b, a
+    ld   e, BOX_TOP_Y
+    call hline              ; top edge
+    ld   a, (box_l)
+    inc  a
+    ld   c, a
+    ld   a, (box_r)
+    dec  a
+    ld   b, a
+    ld   e, BOX_BOT_Y
+    call hline              ; bottom edge
+    ld   a, (box_l)
+    ld   d, a
+    ld   c, BOX_TOP_Y + 1
+    ld   b, BOX_BOT_Y - 1
+    call vline              ; left edge
+    ld   a, (box_r)
+    ld   d, a
+    ld   c, BOX_TOP_Y + 1
+    ld   b, BOX_BOT_Y - 1
+    jp   vline              ; right edge (tail)
+
+; col_span — colour a run of cells. In: B=row, D=firstcell, E=ncells, A=colour.
+col_span:
+    push af
+    ld   h, b
+    ld   l, 0               ; HL = row*256
+    ld   a, d
+    add  a, a
+    add  a, a
+    add  a, a               ; firstcell*8
+    ld   c, a
+    ld   b, 0
+    add  hl, bc
+    ld   bc, COLBASE
+    add  hl, bc             ; HL = COLBASE + row*256 + firstcell*8
+    ld   a, e
+    add  a, a
+    add  a, a
+    add  a, a               ; ncells*8
+    ld   c, a
+    ld   b, 0
+    pop  af
+    call FILVRM
+    ret
+
+; colour_box_red — paint the box cells red (title cells stay white).
+colour_box_red:
+    ld   a, (box_l)
+    rrca
+    rrca
+    rrca
+    and  0x1F
+    ld   (box_lc), a
+    ld   a, (box_r)
+    rrca
+    rrca
+    rrca
+    and  0x1F
+    ld   (box_rc), a
+    ld   hl, box_lc
+    sub  (hl)               ; A = rightcell - leftcell
+    inc  a
+    ld   (box_nc), a        ; cell count for the horizontal edges
+    ; top edge row 0
+    ld   a, (box_lc)
+    ld   d, a
+    ld   a, (box_nc)
+    ld   e, a
+    ld   b, 0
+    ld   a, COL_RED
+    call col_span
+    ; bottom edge row 2
+    ld   a, (box_lc)
+    ld   d, a
+    ld   a, (box_nc)
+    ld   e, a
+    ld   b, 2
+    ld   a, COL_RED
+    call col_span
+    ; left side cell, row 1
+    ld   a, (box_lc)
+    ld   d, a
+    ld   e, 1
+    ld   b, 1
+    ld   a, COL_RED
+    call col_span
+    ; right side cell, row 1
+    ld   a, (box_rc)
+    ld   d, a
+    ld   e, 1
+    ld   b, 1
+    ld   a, COL_RED
+    call col_span
+    ret
+
+;==============================================================================
+; BOOT JINGLE — short Konami-style ascending arpeggio on PSG channel A.
+; Uses the MSX internal PSG (I/O 0xA0 address / 0xA1 data). reg7 = 0xBE keeps
+; the standard MSX port directions (A input, B output) so nothing else breaks.
+;==============================================================================
+JINGLE_N equ 6
+play_jingle:
+    ld   a, 7               ; mixer
+    out  (0xA0), a
+    ld   a, 0xBE            ; tone A enabled; port dirs preserved
+    out  (0xA1), a
+    ld   a, 8               ; channel A volume register
+    out  (0xA0), a
+    ld   a, 13
+    out  (0xA1), a
+    ld   hl, jingle_notes
+    ld   b, JINGLE_N
+pj_loop:
+    push bc
+    xor  a                  ; reg 0 = tone A period, fine
+    out  (0xA0), a
+    ld   a, (hl)
+    out  (0xA1), a
+    inc  hl
+    ld   a, 1               ; reg 1 = tone A period, coarse
+    out  (0xA0), a
+    ld   a, (hl)
+    out  (0xA1), a
+    inc  hl
+    ld   b, (hl)            ; duration in frames
+    inc  hl
+pj_delay:
+    halt
+    djnz pj_delay
+    pop  bc
+    djnz pj_loop
+    ld   a, 8               ; silence channel A
+    out  (0xA0), a
+    xor  a
+    out  (0xA1), a
+    ret
+
+; note table: period low, period high, duration (frames).
+jingle_notes:
+    db   107, 0, 6          ; C6
+    db   85,  0, 6          ; E6
+    db   107, 0, 6          ; C6
+    db   85,  0, 6          ; E6
+    db   71,  0, 6          ; G6
+    db   53,  0, 24         ; C7 (held)
+
+;------------------------------------------------------------------------------
+; 6x8 font: 64 glyphs (ASCII 0x20..0x5F), 8 bytes each = 512 bytes.
+; Generated from font6x8.png by packager/font_to_bin.py.
+;------------------------------------------------------------------------------
+font:
+    incbin "font6x8.bin"
+
+;==============================================================================
 ; STATIC STRINGS
 ;==============================================================================
+; Packager-rewritable title buffer. Fixed 32 bytes: text + NUL + padding.
+; The packager finds it by the default string below and overwrites up to 31
+; chars (+NUL). blit/str_width measure to the first NUL, so shorter titles work
+; and the red box auto-fits. Keep this default in sync with both packagers.
+TITLE_MAXLEN equ 32
 msg_title:
-    db   "  YAMANOOTO KONAMI COMPILATION  ",0
+    db   "YAMANOOTO KONAMI COLLECTION"
+    ds   TITLE_MAXLEN - 27, 0
 msg_dashes:
     db   "----------------------------------------",0
 msg_footer:
@@ -785,47 +1500,38 @@ msg_blank_line:
 ; SPLASH (shown once at boot, before the menu)
 ;==============================================================================
 draw_splash:
-    ; line 1: row 8, centered (17 chars -> col 12)
-    ld   h, 12
-    ld   l, 8
-    call POSIT
     ld   hl, splash_l1
-    call print_string
-
-    ld   h, 8
-    ld   l, 11
-    call POSIT
+    ld   a, 77
+    ld   b, 8
+    call blit_line_at
     ld   hl, splash_l2
-    call print_string
-
-    ld   h, 9
-    ld   l, 12
-    call POSIT
+    ld   a, 53
+    ld   b, 11
+    call blit_line_at
     ld   hl, splash_l3
-    call print_string
-
-    ld   h, 9
-    ld   l, 14
-    call POSIT
+    ld   a, 62
+    ld   b, 12
+    call blit_line_at
     ld   hl, splash_l4
-    call print_string
-
-    ld   h, 12
-    ld   l, 15
-    call POSIT
+    ld   a, 56
+    ld   b, 14
+    call blit_line_at
     ld   hl, splash_l5
-    call print_string
-
-    ld   h, 9
-    ld   l, 18
-    call POSIT
+    ld   a, 80
+    ld   b, 15
+    call blit_line_at
     ld   hl, splash_prompt
-    call print_string
+    ld   a, 56
+    ld   b, 18
+    call blit_line_at
 
     call CHGET              ; wait for any key
 
+    ; clear the pattern table so the menu starts from a blank screen
+    ld   hl, PATBASE
+    ld   bc, 0x1800
     xor  a
-    call CLS
+    call FILVRM
     ret
 
 splash_l1:

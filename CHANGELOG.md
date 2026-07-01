@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.99 — 2026-07-01
+
+- **NEW: graphical SCREEN 2 in-cart menu.** The launcher (`launcher/launcher.asm`)
+  was rewritten from monochrome SCREEN 0 text to a SCREEN 2 GUI, still
+  MSX1-compatible (runs on every Yamanooto host):
+  - Proportional pixel font from a custom `font6x8.png` — converter
+    `packager/font_to_bin.py` → `launcher/font6x8.bin` (incbin-ed into the ROM).
+  - Centred title inside a **rounded red box** that auto-fits the title width.
+  - Inverse selection bar hugging just the game title.
+  - **Pixel-smooth scrolling marquee** that keeps moving while you navigate.
+  - **Jump-to-letter (A–Z)** navigation plus cursor/paging and a **"PAG x/y"**
+    page counter in the bottom-right corner.
+  - **Konami-style boot jingle** on the internal PSG.
+  The game-launch protocol (trampoline, ASCII16/SCC helpers, on-flash directory
+  format) is unchanged — existing images still pack and games still boot.
+- **NEW: configurable menu title** — `--title` / `[launcher].title` on the CLI
+  and a "Menu title" field in the GUI. The red box auto-fits the text.
+- **Marquee: empty means empty.** With no marquee set (empty GUI field, or no
+  `--marquee`/`[launcher].marquee`) the marquee is now BLANK instead of showing
+  the default placeholder. The Python CLI and the Rust GUI behave identically.
+- The GUI now embeds the new SCREEN 2 launcher (`gui-rs/data/launcher.bin`).
+
 ## v0.95 — 2026-05-22
 
 - **NEW: native cross-platform GUI builder** (`gui-rs/`, Rust + egui).

@@ -178,11 +178,11 @@ assert len(MARQUEE_ANCHOR) == MARQUEE_CUSTOM_SIZE
 
 
 def _apply_marquee(launcher_bytes: bytes, custom: str | None) -> bytes:
-    """Overwrite the custom marquee buffer in both copies. No-op if custom is
-    None or empty. The MSX font is uppercase-only — text is uppercased.
-    The text is padded with spaces to exactly MARQUEE_CUSTOM_SIZE bytes
-    (centered if shorter, truncated if longer)."""
-    if not custom:
+    """Overwrite the custom marquee buffer in both copies. `None` keeps the
+    baked-in default placeholder; an empty string BLANKS the marquee (fills it
+    with spaces) so nothing scrolls — matching the GUI. The MSX font is
+    uppercase-only, so text is uppercased and padded to MARQUEE_CUSTOM_SIZE."""
+    if custom is None:
         return launcher_bytes
 
     custom_up = custom.upper()
@@ -214,6 +214,40 @@ def _apply_marquee(launcher_bytes: bytes, custom: str | None) -> bytes:
         )
     for idx in positions:
         data[idx:idx + MARQUEE_CUSTOM_SIZE] = custom_bytes
+    return bytes(data)
+
+
+# --- Title customization ------------------------------------------------------
+# The launcher's title is a fixed 32-byte buffer (text + NUL + padding) located
+# by its default string. Keep TITLE_ANCHOR in sync with launcher.asm's msg_title.
+TITLE_ANCHOR = b"YAMANOOTO KONAMI COLLECTION"
+TITLE_BUF_SIZE = 32
+
+
+def _apply_title(launcher_bytes: bytes, title: str | None) -> bytes:
+    """Overwrite the title buffer. No-op if title is None/empty. The MSX font is
+    uppercase-only, so the text is uppercased; it is NUL-terminated and padded to
+    TITLE_BUF_SIZE. Longer titles are truncated (they'd overflow the screen/box)."""
+    if not title:
+        return launcher_bytes
+    t = title.upper()
+    maxlen = TITLE_BUF_SIZE - 1          # leave room for the NUL terminator
+    if len(t) > maxlen:
+        print(f"--title: truncated to {maxlen} chars (was {len(t)})", file=sys.stderr)
+        t = t[:maxlen]
+    buf = t.encode("ascii", errors="replace") + b"\x00"
+    buf = buf + b"\x00" * (TITLE_BUF_SIZE - len(buf))
+    assert len(buf) == TITLE_BUF_SIZE
+
+    data = bytearray(launcher_bytes)
+    idx = data.find(TITLE_ANCHOR)
+    if idx < 0:
+        raise RuntimeError(
+            "--title: title anchor not found in launcher.bin. Is it from a "
+            "version that supports a custom title? Rebuild it with pasmo.")
+    if data.find(TITLE_ANCHOR, idx + 1) >= 0:
+        raise RuntimeError("--title: title anchor found more than once in launcher.bin.")
+    data[idx:idx + TITLE_BUF_SIZE] = buf
     return bytes(data)
 
 
@@ -490,10 +524,14 @@ def cmd_build(args):
     launcher_path = Path(cfg["launcher"]["file"])
     launcher_data = launcher_path.read_bytes()
 
-    # Custom marquee: CLI --marquee overrides; otherwise [launcher].marquee
-    # from TOML; otherwise leave the default (repo URL) baked into the .bin.
-    marquee = args.marquee if args.marquee else cfg.get("launcher", {}).get("marquee")
-    launcher_data = _apply_marquee(launcher_data, marquee)
+    # Custom marquee: CLI --marquee overrides TOML [launcher].marquee. If neither
+    # is set, the marquee is BLANKED (nothing scrolls), matching the GUI.
+    marquee = args.marquee if args.marquee is not None else cfg.get("launcher", {}).get("marquee")
+    launcher_data = _apply_marquee(launcher_data, marquee if marquee is not None else "")
+
+    # Custom title: CLI --title overrides; otherwise [launcher].title from TOML.
+    title = args.title if args.title else cfg.get("launcher", {}).get("title")
+    launcher_data = _apply_title(launcher_data, title)
 
     config_dir = Path(args.config).resolve().parent
     games = []
@@ -690,7 +728,8 @@ def cmd_pack_folder(args):
     launcher_path = Path(args.launcher) if args.launcher else (
         Path(__file__).resolve().parent.parent / "launcher" / "launcher.bin")
     launcher_data = launcher_path.read_bytes()
-    launcher_data = _apply_marquee(launcher_data, args.marquee)
+    launcher_data = _apply_marquee(launcher_data, args.marquee if args.marquee is not None else "")
+    launcher_data = _apply_title(launcher_data, args.title)
 
     rom_paths = sorted(folder.glob("*.rom")) + sorted(folder.glob("*.ROM"))
 
@@ -805,6 +844,9 @@ def main():
                          "Replaces the default repo-URL portion; the anti-scam notice "
                          "before it is always shown. Can also be set via [launcher].marquee "
                          "in the TOML.")
+    pb.add_argument("--title", default=None,
+                    help="Custom menu title (max 31 chars, uppercased). Also settable via "
+                         "[launcher].title in the TOML. The red title box auto-fits.")
     pb.set_defaults(func=cmd_build)
 
     pt = sub.add_parser("test", help="Build minimal test image with dummy entries")
@@ -833,6 +875,9 @@ def main():
                     help="Custom text for the scrolling marquee (max 64 chars, uppercased). "
                          "Replaces the default repo-URL portion; the anti-scam notice "
                          "before it is always shown.")
+    pf.add_argument("--title", default=None,
+                    help="Custom menu title (max 31 chars, uppercased). The red title "
+                         "box auto-fits.")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()

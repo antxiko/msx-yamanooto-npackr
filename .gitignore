@@ -31,5 +31,8 @@ test_*.toml
 .vscode/
 .idea/
 
+# forja local dev tooling (forensic gate config + reports)
+.forja/
+
 # Allow the pre-built launcher (it's our own code, not a ROM)
 !launcher/launcher.bin

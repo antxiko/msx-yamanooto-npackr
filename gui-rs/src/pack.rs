@@ -37,6 +37,11 @@ pub const MARQUEE_CUSTOM_SIZE: usize = 128;
 /// The byte right after the anchor is the splash enable flag (1 = show).
 pub const CFG_ANCHOR: &[u8] = b"YMNTCFG!";
 
+/// Default menu title baked into launcher.bin; used as the anchor to find the
+/// fixed 32-byte title buffer. Keep in sync with launcher.asm's msg_title.
+pub const TITLE_ANCHOR: &[u8] = b"YAMANOOTO KONAMI COLLECTION";
+pub const TITLE_BUF_SIZE: usize = 32;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlashSize { Mb2, Mb8 }
 
@@ -201,8 +206,9 @@ pub fn build_directory(games: &[Game]) -> Result<Vec<u8>, String> {
 }
 
 pub fn apply_marquee(launcher: &mut Vec<u8>, custom: Option<&str>) -> Result<(), String> {
+    // None keeps the baked-in default placeholder; Some("") intentionally blanks
+    // the marquee (fills it with spaces) so nothing scrolls.
     let Some(text) = custom else { return Ok(()); };
-    if text.is_empty() { return Ok(()); }
 
     let upper = text.to_uppercase();
     let mut buf = [b' '; MARQUEE_CUSTOM_SIZE];
@@ -233,9 +239,101 @@ pub fn apply_marquee(launcher: &mut Vec<u8>, custom: Option<&str>) -> Result<(),
     Ok(())
 }
 
+/// Overwrite the fixed 32-byte title buffer (text + NUL + padding). No-op if
+/// title is None/empty. The MSX font is uppercase-only, so text is uppercased;
+/// longer titles are truncated (they'd overflow the screen / red box).
+pub fn apply_title(launcher: &mut [u8], title: Option<&str>) -> Result<(), String> {
+    let Some(text) = title else { return Ok(()); };
+    if text.is_empty() { return Ok(()); }
+
+    let upper = text.to_uppercase();
+    let mut bytes: Vec<u8> = upper.chars()
+        .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+        .collect();
+    bytes.truncate(TITLE_BUF_SIZE - 1);          // leave room for the NUL
+    let mut buf = [0u8; TITLE_BUF_SIZE];          // NUL-terminated + padded
+    buf[..bytes.len()].copy_from_slice(&bytes);
+
+    let Some(idx) = find_subslice(launcher, TITLE_ANCHOR) else {
+        return Err("title anchor not found in launcher.bin".into());
+    };
+    launcher[idx..idx + TITLE_BUF_SIZE].copy_from_slice(&buf);
+    Ok(())
+}
+
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > hay.len() { return None; }
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    fn buf_with_anchor() -> (Vec<u8>, usize) {
+        let mut b = vec![0xAAu8; 8];                 // prefix sentinel
+        let idx = b.len();
+        b.extend_from_slice(TITLE_ANCHOR);
+        b.extend(std::iter::repeat(0u8).take(TITLE_BUF_SIZE - TITLE_ANCHOR.len()));
+        b.extend_from_slice(&[0xBBu8; 8]);           // suffix sentinel
+        (b, idx)
+    }
+
+    #[test]
+    fn overwrites_uppercased_and_nul_terminated() {
+        let (mut b, idx) = buf_with_anchor();
+        apply_title(&mut b, Some("mi juego")).unwrap();
+        assert_eq!(&b[idx..idx + 8], b"MI JUEGO");   // uppercased
+        assert_eq!(b[idx + 8], 0);                   // NUL terminator
+        assert_eq!(&b[..8], &[0xAAu8; 8]);           // prefix intact
+        assert_eq!(&b[idx + TITLE_BUF_SIZE..], &[0xBBu8; 8]); // suffix intact
+    }
+
+    #[test]
+    fn none_and_empty_are_noops() {
+        let (orig, _) = buf_with_anchor();
+        let mut b = orig.clone();
+        apply_title(&mut b, None).unwrap();
+        assert_eq!(b, orig);
+        apply_title(&mut b, Some("")).unwrap();
+        assert_eq!(b, orig);
+    }
+
+    #[test]
+    fn overlong_title_truncated_with_nul() {
+        let (mut b, idx) = buf_with_anchor();
+        apply_title(&mut b, Some(&"X".repeat(50))).unwrap();
+        assert_eq!(&b[idx..idx + (TITLE_BUF_SIZE - 1)], &vec![b'X'; TITLE_BUF_SIZE - 1][..]);
+        assert_eq!(b[idx + TITLE_BUF_SIZE - 1], 0);  // still NUL-terminated
+    }
+
+    // End-to-end: build a real image through the exact path the Build button
+    // uses (build_image), with a custom title/marquee, and write it out so it
+    // can be booted in openMSX. Verifies the Rust GUI produces a bootable ROM
+    // with the new SCREEN 2 launcher — not just that pieces compile.
+    #[test]
+    fn builds_bootable_rom_via_build_image() {
+        let launcher = std::fs::read("data/launcher.bin").expect("data/launcher.bin");
+        assert!(find_subslice(&launcher, TITLE_ANCHOR).is_some(),
+                "embedded launcher must be the new SCREEN 2 one");
+        let mut games = vec![
+            Game::new("TEST ALPHA".into(), vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
+            Game::new("TEST BETA".into(),  vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
+            Game::new("TEST GAMMA".into(), vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
+        ];
+        let (image, dropped) = build_image(
+            &launcher, &mut games, FlashSize::Mb8,
+            Some(""), Some("MI TITULO GUI"), false,   // empty marquee -> blank
+        ).expect("build_image");
+        assert_eq!(image.len(), FlashSize::Mb8.bytes());
+        assert!(dropped.is_empty());
+        // title override landed in the launcher region of the image
+        assert!(find_subslice(&image[..LAUNCHER_SIZE], b"MI TITULO GUI").is_some());
+        // an empty marquee must BLANK the default placeholder, not keep it
+        assert!(find_subslice(&image[..LAUNCHER_SIZE], b"THIS TEXT CAN BE REPLACED").is_none(),
+                "empty marquee should blank the default placeholder");
+        std::fs::write("/tmp/rust_gui.rom", &image).expect("write /tmp/rust_gui.rom");
+    }
 }
 
 pub fn apply_splash_flag(launcher: &mut [u8], show_splash: bool) -> Result<(), String> {
@@ -255,10 +353,12 @@ pub fn build_image(
     games: &mut Vec<Game>,
     flash: FlashSize,
     marquee: Option<&str>,
+    title: Option<&str>,
     show_splash: bool,
 ) -> Result<(Vec<u8>, Vec<Game>), String> {
     let mut launcher = launcher.to_vec();
     apply_marquee(&mut launcher, marquee)?;
+    apply_title(&mut launcher, title)?;
     apply_splash_flag(&mut launcher, show_splash)?;
     if launcher.len() > LAUNCHER_SIZE {
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));

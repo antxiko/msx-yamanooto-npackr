@@ -1,6 +1,6 @@
 [package]
 name = "yamanooto-gui"
-version = "0.1.0"
+version = "0.99.0"
 edition = "2021"
 description = "GUI for MSX Yamanooto nPackR. Drop ROMs, pick flash size + marquee, build image."
 authors = ["Antxiko Gorjon <antxiko@gmail.com>"]
