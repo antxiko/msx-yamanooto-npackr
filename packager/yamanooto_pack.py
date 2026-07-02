@@ -251,6 +251,64 @@ def _apply_title(launcher_bytes: bytes, title: str | None) -> bytes:
     return bytes(data)
 
 
+# --- Menu colours ------------------------------------------------------------
+# The colour nibbles live in the "YMNTCFG!" config block of launcher.bin:
+#   anchor (8 bytes) | +8 splash flag | +9 text | +10 bg | +11 box
+# (see launcher.asm cfg_col_*). Each is an MSX palette index; init_colors in the
+# launcher derives the SCREEN 2 colour-table bytes from them at boot.
+CFG_ANCHOR = b"YMNTCFG!"
+CFG_COL_TEXT_OFF = 9   # offsets from the anchor start
+CFG_COL_BG_OFF = 10
+CFG_COL_BOX_OFF = 11
+
+# MSX1 (TMS9918) palette. Index 0 is transparent; menu colours use 1-15.
+MSX_COLORS = {
+    "transparent": 0, "black": 1, "medium-green": 2, "light-green": 3,
+    "dark-blue": 4, "light-blue": 5, "dark-red": 6, "cyan": 7,
+    "medium-red": 8, "light-red": 9, "dark-yellow": 10, "light-yellow": 11,
+    "dark-green": 12, "magenta": 13, "gray": 14, "grey": 14, "white": 15,
+}
+
+
+def _parse_color(value) -> int:
+    """Accept an int (1-15) or an MSX colour name; return the palette index."""
+    if isinstance(value, int):
+        idx = value
+    else:
+        s = str(value).strip().lower()
+        if s in MSX_COLORS:
+            return MSX_COLORS[s]
+        try:
+            idx = int(s)
+        except ValueError:
+            names = ", ".join(sorted(k for k in MSX_COLORS if k != "grey"))
+            raise ValueError(f"colour must be 1-15 or a name ({names}); got {value!r}")
+    if not 1 <= idx <= 15:
+        raise ValueError(f"colour index must be 1-15; got {idx}")
+    return idx
+
+
+def _apply_colors(launcher_bytes: bytes, text=None, bg=None, box=None) -> bytes:
+    """Patch the menu colour nibbles (text/background/title-box). Each arg is an
+    MSX palette index 1-15 (or a name), or None to keep the launcher default.
+    No-op when all three are None."""
+    if text is None and bg is None and box is None:
+        return launcher_bytes
+    data = bytearray(launcher_bytes)
+    idx = data.find(CFG_ANCHOR)
+    if idx < 0:
+        raise RuntimeError(
+            "--color-*: 'YMNTCFG!' config anchor not found in launcher.bin. "
+            "Rebuild it with pasmo from a version that supports colours.")
+    if data.find(CFG_ANCHOR, idx + 1) >= 0:
+        raise RuntimeError("--color-*: config anchor found more than once in launcher.bin.")
+    for off, val in ((CFG_COL_TEXT_OFF, text), (CFG_COL_BG_OFF, bg), (CFG_COL_BOX_OFF, box)):
+        if val is None:
+            continue
+        data[idx + off] = _parse_color(val)
+    return bytes(data)
+
+
 def round_up_to_32k(n: int) -> int:
     return (n + OFFR_UNIT - 1) & ~(OFFR_UNIT - 1)
 
@@ -533,6 +591,13 @@ def cmd_build(args):
     title = args.title if args.title else cfg.get("launcher", {}).get("title")
     launcher_data = _apply_title(launcher_data, title)
 
+    # Menu colours: CLI --color-* overrides TOML [launcher].color_{text,bg,box}.
+    lcfg = cfg.get("launcher", {})
+    col_text = args.color_text if args.color_text is not None else lcfg.get("color_text")
+    col_bg = args.color_bg if args.color_bg is not None else lcfg.get("color_bg")
+    col_box = args.color_box if args.color_box is not None else lcfg.get("color_box")
+    launcher_data = _apply_colors(launcher_data, col_text, col_bg, col_box)
+
     config_dir = Path(args.config).resolve().parent
     games = []
     for entry in cfg.get("games", []):
@@ -730,6 +795,7 @@ def cmd_pack_folder(args):
     launcher_data = launcher_path.read_bytes()
     launcher_data = _apply_marquee(launcher_data, args.marquee if args.marquee is not None else "")
     launcher_data = _apply_title(launcher_data, args.title)
+    launcher_data = _apply_colors(launcher_data, args.color_text, args.color_bg, args.color_box)
 
     rom_paths = sorted(folder.glob("*.rom")) + sorted(folder.glob("*.ROM"))
 
@@ -847,6 +913,13 @@ def main():
     pb.add_argument("--title", default=None,
                     help="Custom menu title (max 31 chars, uppercased). Also settable via "
                          "[launcher].title in the TOML. The red title box auto-fits.")
+    pb.add_argument("--color-text", type=_parse_color, default=None, metavar="COLOR",
+                    help="Menu text colour: MSX palette index 1-15 or a name (e.g. white, "
+                         "cyan, light-yellow). Also [launcher].color_text in the TOML.")
+    pb.add_argument("--color-bg", type=_parse_color, default=None, metavar="COLOR",
+                    help="Menu background colour (1-15 or name). Also [launcher].color_bg.")
+    pb.add_argument("--color-box", type=_parse_color, default=None, metavar="COLOR",
+                    help="Title-box colour (1-15 or name). Also [launcher].color_box.")
     pb.set_defaults(func=cmd_build)
 
     pt = sub.add_parser("test", help="Build minimal test image with dummy entries")
@@ -878,6 +951,13 @@ def main():
     pf.add_argument("--title", default=None,
                     help="Custom menu title (max 31 chars, uppercased). The red title "
                          "box auto-fits.")
+    pf.add_argument("--color-text", type=_parse_color, default=None, metavar="COLOR",
+                    help="Menu text colour: MSX palette index 1-15 or a name (e.g. white, "
+                         "cyan, light-yellow).")
+    pf.add_argument("--color-bg", type=_parse_color, default=None, metavar="COLOR",
+                    help="Menu background colour (1-15 or name).")
+    pf.add_argument("--color-box", type=_parse_color, default=None, metavar="COLOR",
+                    help="Title-box colour (1-15 or name).")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()

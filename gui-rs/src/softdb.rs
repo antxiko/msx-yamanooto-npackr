@@ -41,7 +41,11 @@ impl Softdb {
                         cur_system.clear();
                         for attr in e.attributes().flatten() {
                             let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                            let v = String::from_utf8_lossy(&attr.value).to_string();
+                            // Decode XML entities (&apos; &amp; &quot; &lt; &gt; and
+                            // numeric refs) so titles like "Konami's Boxing" read right.
+                            let v = attr.unescape_value()
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).to_string());
                             if k == "title" { cur_title = v; }
                             else if k == "system" { cur_system = v; }
                         }
@@ -51,7 +55,11 @@ impl Softdb {
                         let mut status = String::new();
                         for attr in e.attributes().flatten() {
                             let k = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                            let v = String::from_utf8_lossy(&attr.value).to_string();
+                            // Decode XML entities (&apos; &amp; &quot; &lt; &gt; and
+                            // numeric refs) so titles like "Konami's Boxing" read right.
+                            let v = attr.unescape_value()
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).to_string());
                             match k {
                                 "sha1" => sha = v.to_lowercase(),
                                 "type" => typ = v,
@@ -86,6 +94,23 @@ impl Softdb {
 
     pub fn lookup(&self, sha1: &str) -> Option<&Entry> {
         self.by_sha1.get(&sha1.to_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_xml_entities_in_title() {
+        let xml = br#"<softwaredb>
+          <software title="Konami&apos;s Boxing &amp; Fun" system="MSX">
+            <rom sha1="ABCDEF0123456789ABCDEF0123456789ABCDEF01" type="ASCII8" status="GoodMSX"/>
+          </software>
+        </softwaredb>"#;
+        let db = Softdb::parse(xml);
+        let e = db.lookup("abcdef0123456789abcdef0123456789abcdef01").expect("entry");
+        assert_eq!(e.title, "Konami's Boxing & Fun");
     }
 }
 

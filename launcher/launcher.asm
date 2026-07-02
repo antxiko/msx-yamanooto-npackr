@@ -52,9 +52,13 @@ PATBASE equ 0x0000          ; pattern generator table (3*2KB = 768 tiles)
 NAMBASE equ 0x1800          ; name table (32x24 = 768 bytes)
 COLBASE equ 0x2000          ; colour table (per 8x1: fg<<4 | bg)
 
-COL_NORMAL equ 0xF1         ; white on black
-COL_HILITE equ 0x1F         ; black on white (inverse selection bar)
-COL_RED    equ 0x81         ; medium red on black (title box)
+; NOTE: menu colours are no longer compile-time constants. They are computed
+; at boot into v_col_normal/v_col_hilite/v_col_box from the packager-configured
+; nibbles cfg_col_text/cfg_col_bg/cfg_col_box (see init_colors). These equates
+; are kept only to document the historical defaults.
+COL_NORMAL equ 0xF1         ; default: white on black
+COL_HILITE equ 0x1F         ; default: black on white (inverse selection bar)
+COL_RED    equ 0x81         ; default: medium red on black (title box)
 
 PAGE_ROW   equ 22           ; page counter row (right corner, just above marquee)
 
@@ -136,6 +140,9 @@ box_rc        equ RAM_BASE + 47   ; 1 byte: box right cell (x>>3)
 box_nc        equ RAM_BASE + 48   ; 1 byte: box cell count
 jump_ch       equ RAM_BASE + 49   ; 1 byte: target letter for A-Z jump
 pgbuf         equ RAM_BASE + 50   ; 14 bytes: "PAG x/y" text buffer
+v_col_normal  equ RAM_BASE + 64   ; 1 byte: text row colour  = text<<4 | bg
+v_col_hilite  equ RAM_BASE + 65   ; 1 byte: selection bar    = bg<<4 | text (inverse)
+v_col_box     equ RAM_BASE + 66   ; 1 byte: title box edges   = box<<4 | bg
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -179,12 +186,8 @@ init:
     or   c                  ; page 2 = page 1 slot
     out  (0xA8), a
 
-    ; --- screen setup (SCREEN 2, graphics, white on black) ---
-    ld   a, 15
-    ld   (FORCLR), a        ; white text
-    ld   a, 1
-    ld   (BAKCLR), a        ; black background
-    ld   (BDRCLR), a        ; black border
+    ; --- screen setup (SCREEN 2) using the packager-configured colours ---
+    call init_colors        ; build v_col_* in RAM + set FORCLR/BAKCLR/BDRCLR
     ld   a, 2
     call CHGMOD             ; SCREEN 2 (INIGRP builds the VDP tables)
     call scr2_init          ; name table 0..255 x3, blank patterns, base colour
@@ -418,7 +421,7 @@ mdr_empty:
     ld   a, (rl_i)
     add  a, LIST_TOP
     ld   b, a
-    ld   a, COL_NORMAL
+    ld   a, (v_col_normal)
     call set_row_color
     ld   a, (rl_i)
     ld   hl, menu_cursor
@@ -448,7 +451,7 @@ hilite_title:
     add  a, a               ; * 8 bytes per cell
     ld   c, a
     ld   b, 0
-    ld   a, COL_HILITE
+    ld   a, (v_col_hilite)
     call FILVRM
     ret
 
@@ -942,8 +945,50 @@ print_str_max_loop:
 ; SCREEN 2 FONT BLITTER (proportional, 6px advance, via a RAM line buffer)
 ;==============================================================================
 
+; init_colors — read the packager-configured colour nibbles (cfg_col_*) and
+; build the three colour-table bytes the menu uses, in RAM. Also seeds the
+; BIOS colour work area so INIGRP's initial fill matches. Nibbles masked 0-15.
+;   v_col_normal = text<<4 | bg      (list rows, title text)
+;   v_col_hilite = bg<<4  | text     (inverse selection bar)
+;   v_col_box    = box<<4 | bg       (title box edges)
+init_colors:
+    ld   a, (cfg_col_text)
+    and  0x0F
+    ld   b, a               ; B = text nibble
+    ld   a, (cfg_col_bg)
+    and  0x0F
+    ld   c, a               ; C = bg nibble
+    ld   a, b
+    rlca
+    rlca
+    rlca
+    rlca                    ; A = text<<4
+    or   c
+    ld   (v_col_normal), a
+    ld   a, c
+    rlca
+    rlca
+    rlca
+    rlca                    ; A = bg<<4
+    or   b
+    ld   (v_col_hilite), a
+    ld   a, (cfg_col_box)
+    and  0x0F
+    rlca
+    rlca
+    rlca
+    rlca                    ; A = box<<4
+    or   c
+    ld   (v_col_box), a
+    ld   a, b
+    ld   (FORCLR), a        ; BIOS text colour
+    ld   a, c
+    ld   (BAKCLR), a        ; BIOS background
+    ld   (BDRCLR), a        ; BIOS border
+    ret
+
 ; scr2_init — after CHGMOD 2: name table = 0,1,..,255 (x3 thirds), blank
-; patterns, base colour white-on-black everywhere.
+; patterns, base colour from v_col_normal everywhere.
 scr2_init:
     ld   hl, NAMBASE
     call SETWRT
@@ -962,7 +1007,7 @@ scr2_nt_byte:
     call FILVRM             ; blank all patterns (6144 bytes)
     ld   hl, COLBASE
     ld   bc, 0x1800
-    ld   a, COL_NORMAL
+    ld   a, (v_col_normal)
     call FILVRM             ; white on black everywhere
     ret
 
@@ -992,7 +1037,7 @@ blit_line_at:
     push bc                 ; flush_row_pat does ld bc,256 -> keep the row
     call flush_row_pat      ; LINEBUF -> VRAM pattern row
     pop  bc                 ; B=row
-    ld   a, COL_NORMAL
+    ld   a, (v_col_normal)
     call set_row_color
     ret
 
@@ -1380,7 +1425,7 @@ colour_box_red:
     ld   a, (box_nc)
     ld   e, a
     ld   b, 0
-    ld   a, COL_RED
+    ld   a, (v_col_box)
     call col_span
     ; bottom edge row 2
     ld   a, (box_lc)
@@ -1388,21 +1433,21 @@ colour_box_red:
     ld   a, (box_nc)
     ld   e, a
     ld   b, 2
-    ld   a, COL_RED
+    ld   a, (v_col_box)
     call col_span
     ; left side cell, row 1
     ld   a, (box_lc)
     ld   d, a
     ld   e, 1
     ld   b, 1
-    ld   a, COL_RED
+    ld   a, (v_col_box)
     call col_span
     ; right side cell, row 1
     ld   a, (box_rc)
     ld   d, a
     ld   e, 1
     ld   b, 1
-    ld   a, COL_RED
+    ld   a, (v_col_box)
     call col_span
     ret
 
@@ -1555,9 +1600,15 @@ splash_prompt:
 cfg_anchor:
     db 0x59, 0x4D, 0x4E, 0x54, 0x43, 0x46, 0x47, 0x21   ; "YMNTCFG!"
 cfg_splash_enable:
-    db 1                   ; 0 = skip splash, 1 = show (default)
+    db 1                   ; +8  0 = skip splash, 1 = show (default)
+cfg_col_text:
+    db 15                  ; +9  text colour nibble (MSX palette 1-15). Default white.
+cfg_col_bg:
+    db 1                   ; +10 background colour nibble. Default black.
+cfg_col_box:
+    db 8                   ; +11 title-box colour nibble. Default medium red.
 cfg_reserved:
-    db 0, 0, 0, 0, 0, 0, 0 ; reserved for future toggles
+    db 0, 0, 0, 0          ; +12..15 reserved for future toggles
 
 ;==============================================================================
 ; RAM workspace (page 3, MSX system RAM)

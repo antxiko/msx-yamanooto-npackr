@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **NEW: configurable menu colours.** Text, background and title-box colours are
+  now selectable from the packager. New bytes in the `YMNTCFG!` config block
+  (`cfg_col_text` / `cfg_col_bg` / `cfg_col_box`, MSX palette 1–15); the launcher
+  derives the SCREEN 2 colour-table bytes at boot (`init_colors`): text rows =
+  `text<<4|bg`, selection bar = `bg<<4|text` (inverse, automatic), title box =
+  `box<<4|bg`. Set via CLI `--color-text` / `--color-bg` / `--color-box`
+  (palette index or name, e.g. `cyan`), `[launcher].color_*` in the TOML, or the
+  three MSX-palette dropdowns in the GUI. The launch protocol is untouched.
+- **NEW: live menu preview in the GUI.** A small simulation drawn with the real
+  `font6x8` shows the title box, list, inverse selection bar and marquee, and
+  recolours as you pick colours.
+- **Fix: softdb titles now decode XML entities.** Names like
+  `Konami&apos;s Boxing` now read `Konami's Boxing` in the list/title.
+- **GUI mapper dropdown offers ASCII8 / ASCII16.** For ROMs whose SHA1 is not in
+  the softdb, choosing ASCII8/ASCII16 runs the K5 converter on the pristine ROM.
+
 ## v0.99 — 2026-07-01
 
 - **NEW: graphical SCREEN 2 in-cart menu.** The launcher (`launcher/launcher.asm`)

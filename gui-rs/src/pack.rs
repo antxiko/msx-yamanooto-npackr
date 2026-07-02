@@ -321,9 +321,11 @@ mod title_tests {
             Game::new("TEST BETA".into(),  vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
             Game::new("TEST GAMMA".into(), vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
         ];
+        let colors = MenuColors { text: 7, bg: 4, box_: 11 }; // cyan / dark-blue / light-yellow
         let (image, dropped) = build_image(
             &launcher, &mut games, FlashSize::Mb8,
             Some(""), Some("MI TITULO GUI"), false,   // empty marquee -> blank
+            colors,
         ).expect("build_image");
         assert_eq!(image.len(), FlashSize::Mb8.bytes());
         assert!(dropped.is_empty());
@@ -332,7 +334,26 @@ mod title_tests {
         // an empty marquee must BLANK the default placeholder, not keep it
         assert!(find_subslice(&image[..LAUNCHER_SIZE], b"THIS TEXT CAN BE REPLACED").is_none(),
                 "empty marquee should blank the default placeholder");
+        // colour nibbles landed in the config block
+        let cfg = find_subslice(&image[..LAUNCHER_SIZE], CFG_ANCHOR).expect("cfg anchor");
+        assert_eq!(image[cfg + CFG_COL_TEXT_OFF], 7);
+        assert_eq!(image[cfg + CFG_COL_BG_OFF], 4);
+        assert_eq!(image[cfg + CFG_COL_BOX_OFF], 11);
         std::fs::write("/tmp/rust_gui.rom", &image).expect("write /tmp/rust_gui.rom");
+    }
+
+    #[test]
+    fn apply_colors_patches_and_validates() {
+        // minimal launcher with just the config block
+        let mut lb = Vec::new();
+        lb.extend_from_slice(CFG_ANCHOR);
+        lb.extend_from_slice(&[1, 15, 1, 8, 0, 0, 0, 0]); // splash + defaults + reserved
+        apply_colors(&mut lb, MenuColors { text: 2, bg: 6, box_: 14 }).unwrap();
+        let i = find_subslice(&lb, CFG_ANCHOR).unwrap();
+        assert_eq!((lb[i + 9], lb[i + 10], lb[i + 11]), (2, 6, 14));
+        // out-of-range rejected
+        assert!(apply_colors(&mut lb, MenuColors { text: 0, bg: 1, box_: 8 }).is_err());
+        assert!(apply_colors(&mut lb, MenuColors { text: 16, bg: 1, box_: 8 }).is_err());
     }
 }
 
@@ -348,6 +369,49 @@ pub fn apply_splash_flag(launcher: &mut [u8], show_splash: bool) -> Result<(), S
     Ok(())
 }
 
+/// Menu colour nibble offsets within the config block, measured from the start
+/// of CFG_ANCHOR: +8 splash flag, +9 text, +10 bg, +11 box (see launcher.asm
+/// cfg_col_*).
+pub const CFG_COL_TEXT_OFF: usize = 9;
+pub const CFG_COL_BG_OFF: usize = 10;
+pub const CFG_COL_BOX_OFF: usize = 11;
+
+/// MSX menu colours (TMS9918 palette indices 1-15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuColors {
+    pub text: u8,
+    pub bg: u8,
+    pub box_: u8,
+}
+
+impl Default for MenuColors {
+    /// Launcher defaults: white text on black, medium-red title box.
+    fn default() -> Self {
+        MenuColors { text: 15, bg: 1, box_: 8 }
+    }
+}
+
+pub fn apply_colors(launcher: &mut [u8], colors: MenuColors) -> Result<(), String> {
+    let Some(idx) = find_subslice(launcher, CFG_ANCHOR) else {
+        return Err("config anchor not found in launcher.bin".into());
+    };
+    for (off, val) in [
+        (CFG_COL_TEXT_OFF, colors.text),
+        (CFG_COL_BG_OFF, colors.bg),
+        (CFG_COL_BOX_OFF, colors.box_),
+    ] {
+        if !(1..=15).contains(&val) {
+            return Err(format!("colour index must be 1-15, got {val}"));
+        }
+        let pos = idx + off;
+        if pos >= launcher.len() {
+            return Err("config anchor too close to end of launcher".into());
+        }
+        launcher[pos] = val;
+    }
+    Ok(())
+}
+
 pub fn build_image(
     launcher: &[u8],
     games: &mut Vec<Game>,
@@ -355,11 +419,13 @@ pub fn build_image(
     marquee: Option<&str>,
     title: Option<&str>,
     show_splash: bool,
+    colors: MenuColors,
 ) -> Result<(Vec<u8>, Vec<Game>), String> {
     let mut launcher = launcher.to_vec();
     apply_marquee(&mut launcher, marquee)?;
     apply_title(&mut launcher, title)?;
     apply_splash_flag(&mut launcher, show_splash)?;
+    apply_colors(&mut launcher, colors)?;
     if launcher.len() > LAUNCHER_SIZE {
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));
     }
