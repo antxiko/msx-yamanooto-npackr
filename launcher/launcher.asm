@@ -138,6 +138,8 @@ P_SR_SLTTBL  equ 0xF00D   ; 2 bytes: address of SLTTBL[RAM P3 slot] (0 if !EXP)
 P_SR_BANKS   equ 0xF00F   ; 4 bytes: game's view of the 4 bank regs (ROM banks)
 P_SR_STATE   equ 0xF013   ; 4 bytes/region: 0x00=ROM, else 0x80|sram_page
 P_SR_ERR     equ 0xF017   ; sticky error flag (flush/verify failed)
+P_SR_OFFR    equ 0xF018   ; game's OFFR (engine loader restores it)
+P_SR_W1BANK  equ 0xF019   ; current game-visible window-1 bank (GM2 restore)
 SRAM_HELPER_DST equ 0xF030 ; resident code (entries at +0/+3/+6/+9)
 SRAM_CODE_MAX   equ 0x0310 ; hard budget: 0xF030-0xF33F (stack cushion above)
 SLTTBL       equ 0xFCC5   ; BIOS: secondary-slot reg copies, 1 byte per primary
@@ -1083,8 +1085,8 @@ srs_nslots:
     ld   e, 0                   ; slot index
 srs_scan:
     ld   a, (hl)
-    or   a
-    jr   nz, srs_scan_next
+    cp   0x0F                   ; 0x00/0x01 = committed (page tag); 0x0F/0xFF skip
+    jr   nc, srs_scan_next
     ld   c, e                   ; committed: remember (keep scanning: latest wins)
 srs_scan_next:
     inc  hl
@@ -1181,10 +1183,23 @@ srs_restore:
     or   c
     ld   (P_SR_SUBFLIP), a
 srs_not_exp:
-    ; --- install the mapper variant (phase A: ASCII8-SRAM only) ---
+    ld   a, (P_OFFR)
+    ld   (P_SR_OFFR), a         ; engine loader restores OFFR from here
+    ld   a, 1
+    ld   (P_SR_W1BANK), a       ; window 1 starts at game bank 1
+    ; --- install the mapper variant for this game's SRAM type ---
+    ld   a, (P_SR_TYPE)
+    cp   1                      ; 1 = GameMaster2
+    jr   z, srs_inst_gm2
     ld   hl, sram_a8_src
     ld   de, SRAM_HELPER_DST
     ld   bc, sram_a8_end - sram_a8_src
+    ldir
+    ret
+srs_inst_gm2:
+    ld   hl, sram_gm2_src
+    ld   de, SRAM_HELPER_DST
+    ld   bc, sram_gm2_end - sram_gm2_src
     ldir
     ret
 
@@ -1694,6 +1709,405 @@ sram_a8_end:
 
 ; Hard budget check: the installed helper must fit 0xF070-0xF2FF.
     ds   SRAM_CODE_MAX - (sram_a8_end - sram_a8_src), 0xFF
+
+;------------------------------------------------------------------------------
+; SRAM helper, GameMaster2 variant — executed at SRAM_HELPER_DST (0xF030).
+; GM2 registers 0x6000/0x8000/0xA000 (bit12==0) = regions 1/2/3 (region 0 has
+; no register). Bank value: bit4 = SRAM select, bit5 = SRAM page (2 pages of
+; 4KB), bits 0-3 = 8KB ROM bank. The SRAM is only WRITABLE at 0xB000-0xBFFF
+; (region 3), so the slot-flip is only entered there; regions 1/2 SRAM views
+; are read-only -> flash-map of the page's save slot (page duplicated in the
+; bank, so the 4KB-mirrored-in-8KB view is exact).
+; Save sector: 7 single-bank slots + META; commit log tags each slot with its
+; page (0x00/0x01). The flush machinery is sram_engine_gm2.bin, loaded on
+; demand at 0x8000 (scratch half of the flipped shadow) by smg_engine.
+;------------------------------------------------------------------------------
+sram_gm2_src:
+    jp   SRAM_HELPER_DST + (smg_r0 - sram_gm2_src)   ; +0 (unused on GM2)
+    jp   SRAM_HELPER_DST + (smg_r1 - sram_gm2_src)   ; +3 reg 0x6000
+    jp   SRAM_HELPER_DST + (smg_r2 - sram_gm2_src)   ; +6 reg 0x8000
+    jp   SRAM_HELPER_DST + (smg_r3 - sram_gm2_src)   ; +9 reg 0xA000
+smg_r0:
+    ret                          ; no region-0 register: safe no-op
+smg_r1:
+    push bc
+    ld   c, 1
+    jr   smg_common
+smg_r2:
+    push bc
+    ld   c, 2
+    jr   smg_common
+smg_r3:
+    push bc
+    ld   c, 3
+smg_common:
+    push af
+    push de
+    push hl
+    ld   b, a                   ; B = value written by the game
+    ld   a, i                   ; P/V = IFF2
+    push af
+    di
+    ld   a, (P_SR_ENBIT)        ; 0x10
+    and  b
+    jp   nz, SRAM_HELPER_DST + (smg_sram - sram_gm2_src)
+    ;=== ROM bank value ======================================================
+    ld   a, b
+    and  0x0F
+    ld   b, a                   ; B = 8KB ROM bank (GM2 pairs of 4KB blocks)
+    ld   hl, P_SR_BANKS
+    ld   d, 0
+    ld   e, c
+    add  hl, de
+    ld   (hl), b
+    ld   hl, P_SR_STATE
+    add  hl, de
+    ld   a, (hl)
+    ld   d, a                   ; D = old state
+    ld   (hl), 0                ; STATE[c] = ROM
+    add  a, a
+    jr   nc, smg_rom_write      ; was ROM already
+    ld   a, c
+    cp   3
+    jr   nz, smg_rom_write      ; r1/r2 leaving SRAM: plain remap
+    ; region 3 leaves SRAM (flipped): flush old page, unflip, reprime page 2
+    ld   a, (P_SR_DIRTY)
+    or   a
+    jr   z, smg_fo_nf
+    ld   a, d
+    and  0x01                   ; old page
+    call SRAM_HELPER_DST + (smg_engine - sram_gm2_src)
+smg_fo_nf:
+    call SRAM_HELPER_DST + (smg_unflip - sram_gm2_src)
+    ld   a, b
+    ld   (MAP_BANK3), a         ; region 3 = its new ROM bank
+    ld   a, (P_SR_STATE+2)      ; region 2 reprime per its state
+    add  a, a
+    jr   c, smg_fo_sr2
+    ld   a, (P_SR_BANKS+2)
+    ld   (MAP_BANK2), a
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+smg_fo_sr2:
+    ld   a, (P_SR_STATE+2)
+    and  0x01
+    call SRAM_HELPER_DST + (smg_page_bank - sram_gm2_src)
+    ld   (MAP_BANK2), a
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+smg_rom_write:
+    ; r2 going ROM while flipped (r3 still SRAM): materialise bank in shadow
+    ld   a, c
+    cp   2
+    jr   nz, smg_rw_reg
+    ld   a, (P_SR_FLIP)
+    or   a
+    jr   z, smg_rw_reg
+    call SRAM_HELPER_DST + (smg_copy8k_r2 - sram_gm2_src)
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+smg_rw_reg:
+    call SRAM_HELPER_DST + (smg_wr_bank - sram_gm2_src)
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+    ;=== SRAM value ==========================================================
+smg_sram:
+    ld   a, b
+    rlca
+    rlca
+    rlca                        ; bit5 -> bit0
+    and  0x01
+    ld   e, a                   ; E = page p
+    or   0x80
+    ld   d, a                   ; D = new state 0x80|p
+    ld   a, c
+    cp   3
+    jr   z, smg_sr3
+    cp   1
+    jr   z, smg_sr1
+    ; --- region 2: read-only SRAM view -------------------------------------
+    ld   hl, P_SR_STATE+2
+    ld   a, (hl)
+    cp   d
+    jp   z, SRAM_HELPER_DST + (smg_exit - sram_gm2_src)            ; same page already mapped
+    ld   (hl), d
+    ld   a, (P_SR_FLIP)
+    or   a
+    jr   z, smg_sr2_map
+    ld   a, e
+    call SRAM_HELPER_DST + (smg_page_bank - sram_gm2_src)
+    ld   b, a
+    call SRAM_HELPER_DST + (smg_dup_r2 - sram_gm2_src)
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+smg_sr2_map:
+    ld   a, e
+    call SRAM_HELPER_DST + (smg_page_bank - sram_gm2_src)
+    ld   b, a
+    ld   c, 2
+    call SRAM_HELPER_DST + (smg_wr_bank - sram_gm2_src)
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+    ; --- region 1: read-only SRAM view -------------------------------------
+smg_sr1:
+    ld   hl, P_SR_STATE+1
+    ld   a, (hl)
+    cp   d
+    jp   z, SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+    ld   (hl), d
+    call SRAM_HELPER_DST + (smg_flush_ifd - sram_gm2_src)
+    ld   a, e
+    call SRAM_HELPER_DST + (smg_page_bank - sram_gm2_src)
+    ld   b, a
+    ld   c, 1
+    call SRAM_HELPER_DST + (smg_wr_bank - sram_gm2_src)
+    jp   SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+    ; --- region 3: the writable window (flip domain) ------------------------
+smg_sr3:
+    ld   hl, P_SR_STATE+3
+    ld   a, (hl)
+    cp   d
+    jp   z, SRAM_HELPER_DST + (smg_exit - sram_gm2_src)
+    ld   b, a                   ; B = old state
+    ld   (hl), d
+    ld   a, b
+    add  a, a
+    jr   nc, smg_fi3            ; was ROM: full flip-in
+    ; page switch: flush the OLD page if dirty, then load the new one
+    ld   a, (P_SR_DIRTY)
+    or   a
+    jr   z, smg_sw_load
+    ld   a, b
+    and  0x01
+    call SRAM_HELPER_DST + (smg_engine - sram_gm2_src)
+    call SRAM_HELPER_DST + (smg_build_r2 - sram_gm2_src)
+    jr   smg_sw_load
+smg_fi3:
+    call SRAM_HELPER_DST + (smg_flip - sram_gm2_src)
+    call SRAM_HELPER_DST + (smg_build_r2 - sram_gm2_src)
+smg_sw_load:
+    ld   a, e
+    call SRAM_HELPER_DST + (smg_page_bank - sram_gm2_src)
+    ld   b, a
+    call SRAM_HELPER_DST + (smg_dup_r3 - sram_gm2_src)
+    ld   a, 1
+    ld   (P_SR_DIRTY), a
+smg_exit:
+    pop  af
+    jp   po, SRAM_HELPER_DST + (smg_noei - sram_gm2_src)
+    ei
+smg_noei:
+    pop  hl
+    pop  de
+    pop  af
+    pop  bc
+    ret
+
+; --- flush if flipped+dirty (region-1 remap path) -----------------------------
+smg_flush_ifd:
+    ld   a, (P_SR_FLIP)
+    or   a
+    ret  z
+    ld   a, (P_SR_DIRTY)
+    or   a
+    ret  z
+    ld   a, (P_SR_STATE+3)
+    and  0x01
+    call SRAM_HELPER_DST + (smg_engine - sram_gm2_src)
+    jp   SRAM_HELPER_DST + (smg_build_r2 - sram_gm2_src)
+
+; --- load + run the flush engine (A = page to flush). Requires FLIP. ----------
+smg_engine:
+    push af
+    ld   a, ENAR_REGEN
+    ld   (YAMA_ENAR), a
+    xor  a
+    ld   (YAMA_OFFR), a         ; absolute banking: reach the launcher banks
+    ld   a, GM2_ENGINE_BANK
+    ld   (MAP_BANK1), a
+    ld   hl, 0x6000 + GM2_ENGINE_OFF
+    ld   de, 0x8000
+    ld   bc, GM2_ENGINE_LEN
+    ldir
+    ld   a, (P_SR_OFFR)
+    ld   (YAMA_OFFR), a         ; back to the game's offset
+    xor  a
+    ld   (YAMA_ENAR), a
+    pop  af
+    call 0x8000                 ; run the engine (DI, flipped)
+    jp   SRAM_HELPER_DST + (smg_restore_w1 - sram_gm2_src)
+
+; --- A = page (0/1) -> A = its save-slot bank (game-relative) -----------------
+; Latest committed slot for that page; if none, the last (erased) slot area.
+smg_page_bank:
+    push bc
+    push de
+    push hl
+    ld   c, a
+    ld   a, (P_SR_SECREL)
+    add  a, 7
+    ld   (MAP_BANK1), a         ; window 1 = META
+    ld   hl, 0x6010
+    ld   a, (P_SR_NSLOTS)
+    ld   b, a
+    ld   d, 0
+    ld   e, 0xFF
+smb_loop:
+    ld   a, (hl)
+    cp   c
+    jr   nz, smb_next
+    ld   e, d
+smb_next:
+    inc  hl
+    inc  d
+    djnz smb_loop
+    ld   a, e
+    cp   0xFF
+    jr   nz, smb_have
+    ld   a, (P_SR_NSLOTS)
+    dec  a                      ; virgin page -> last slot area (erased 0xFF)
+smb_have:
+    ld   b, a
+    ld   a, (P_SR_SECREL)
+    add  a, b
+    ld   b, a
+    call SRAM_HELPER_DST + (smg_restore_w1 - sram_gm2_src)
+    ld   a, b
+    pop  hl
+    pop  de
+    pop  bc
+    ret
+
+; --- rebuild the 0x8000 scratch half per STATE[2] (requires FLIP) -------------
+smg_build_r2:
+    ld   a, (P_SR_STATE+2)
+    add  a, a
+    jr   c, smb2_sram
+    ld   a, (P_SR_BANKS+2)
+    ld   b, a
+    jp   SRAM_HELPER_DST + (smg_copy8k_r2 - sram_gm2_src)
+smb2_sram:
+    ld   a, (P_SR_STATE+2)
+    and  0x01
+    call SRAM_HELPER_DST + (smg_page_bank - sram_gm2_src)
+    ld   b, a
+    ; fall through: page dup into 0x8000/0x9000
+smg_dup_r2:                     ; bank B: 4KB dup -> 0x8000 + 0x9000
+    ld   d, 0x80
+    jr   smg_dup
+smg_dup_r3:                     ; bank B: 4KB dup -> 0xA000 + 0xB000
+    ld   d, 0xA0
+smg_dup:
+    ld   a, b
+    ld   (MAP_BANK1), a
+    ld   e, 0
+    ld   hl, 0x6000
+    push bc
+    push de
+    ld   bc, 0x1000
+    ldir                        ; first 4KB half
+    pop  de
+    ld   a, d
+    add  a, 0x10
+    ld   d, a                   ; second half (+0x1000)
+    ld   e, 0
+    ld   hl, 0x6000
+    ld   bc, 0x1000
+    ldir
+    pop  bc
+    jp   SRAM_HELPER_DST + (smg_restore_w1 - sram_gm2_src)
+
+; --- copy ROM bank B (8KB) into the 0x8000 half (requires FLIP) ---------------
+smg_copy8k_r2:
+    ld   a, b
+    ld   (MAP_BANK1), a
+    ld   hl, 0x6000
+    ld   de, 0x8000
+    push bc
+    ld   bc, 0x2000
+    ldir
+    pop  bc
+    jp   SRAM_HELPER_DST + (smg_restore_w1 - sram_gm2_src)
+
+; --- window 1 back to the game's view (tracked in P_SR_W1BANK) ----------------
+smg_restore_w1:
+    ld   a, (P_SR_W1BANK)
+    ld   (MAP_BANK1), a
+    ret
+
+; --- write B to region C's K5 bank reg (flip-aware; tracks window 1) ----------
+smg_wr_bank:
+    ld   a, c
+    cp   1
+    jr   nz, swb_nw1
+    ld   a, b
+    ld   (P_SR_W1BANK), a       ; region 1 = window 1: remember the mapping
+swb_nw1:
+    ld   a, c
+    rrca
+    rrca
+    rrca                        ; C<<5
+    add  a, 0x50                ; 0x50/0x70/0x90/0xB0
+    ld   d, a
+    ld   e, 0
+    ld   a, c
+    cp   2
+    jr   c, swb_direct
+    ld   a, (P_SR_FLIP)
+    or   a
+    jr   z, swb_direct
+    ld   a, (P_SR_A8GAME)
+    out  (0xA8), a
+    ld   a, b
+    ld   (de), a
+    ld   a, (P_SR_A8FLIP)
+    out  (0xA8), a
+    ret
+swb_direct:
+    ld   a, b
+    ld   (de), a
+    ret
+
+; --- full page-2 flip in/out ---------------------------------------------------
+smg_flip:
+    ld   a, (P_SR_EXP)
+    or   a
+    jr   z, smf_prim
+    ld   a, (P_SR_SUBFLIP)
+    ld   (0xFFFF), a
+    push hl
+    ld   hl, (P_SR_SLTTBL)
+    ld   (hl), a
+    pop  hl
+smf_prim:
+    ld   a, (P_SR_A8FLIP)
+    out  (0xA8), a
+    ld   a, 1
+    ld   (P_SR_FLIP), a
+    ret
+
+smg_unflip:
+    ld   a, (P_SR_A8GAME)
+    out  (0xA8), a
+    ld   a, (P_SR_EXP)
+    or   a
+    jr   z, smu_done
+    ld   a, (P_SR_SUBGAME)
+    ld   (0xFFFF), a
+    push hl
+    ld   hl, (P_SR_SLTTBL)
+    ld   (hl), a
+    pop  hl
+smu_done:
+    xor  a
+    ld   (P_SR_FLIP), a
+    ret
+sram_gm2_end:
+
+; Hard budget check for the GM2 variant.
+    ds   SRAM_CODE_MAX - (sram_gm2_end - sram_gm2_src), 0xFF
+
+; --- GM2 flush engine blob (assembled separately, loaded at 0x8000) -----------
+sram_gm2_engine_blob:
+    incbin "sram_engine_gm2.bin"
+sram_gm2_engine_end:
+GM2_ENGINE_BANK equ (sram_gm2_engine_blob - 0x4000) / 0x2000
+GM2_ENGINE_OFF  equ (sram_gm2_engine_blob - 0x4000) AND 0x1FFF
+GM2_ENGINE_LEN  equ sram_gm2_engine_end - sram_gm2_engine_blob
 
 ;==============================================================================
 ; STRING / PRINT HELPERS

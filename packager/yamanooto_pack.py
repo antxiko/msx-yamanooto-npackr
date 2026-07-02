@@ -79,6 +79,8 @@ MAPPER_ASCII16_K5 = 'ascii16_k5'   # ROM patched by ascii16_to_k5.py — needs h
 MAPPER_ASCII8_SRAM = 'ascii8_sram' # ASCII8+SRAM patched by ascii8sram_to_k5.py —
                                     # launcher installs the SRAM-emulation helper
                                     # and a 64KB flash save sector is reserved.
+MAPPER_GM2         = 'gm2'         # Game Master 2 patched by gm2_to_yamanooto.py —
+                                    # GM2 SRAM helper variant + 64KB save sector.
 
 # -----------------------------------------------------------------------------
 # Mapper auto-detection via openMSX softwaredb (SHA1 -> mapper type)
@@ -435,6 +437,15 @@ class Game:
             while bit < nbanks:
                 bit <<= 1
             self.sram_enbit = max(bit, 0x10)
+            self.sram_slot_banks = 1
+        elif mapper == MAPPER_GM2:
+            # Game Master 2, patched by gm2_to_yamanooto.py. K5 mode + GM2 SRAM
+            # helper variant (2 pages of 4KB; page-tagged commit log, single-bank
+            # save slots). Enable bit fixed at 0x10, page select at 0x20.
+            self.banks = (0, 1, 2, 3)
+            self.flags = FLAG_SRAM
+            self.sram_type = SRAM_TYPE_GM2
+            self.sram_enbit = 0x10
             self.sram_slot_banks = 1
         else:
             raise ValueError(f"Unknown mapper {mapper!r}")
