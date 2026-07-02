@@ -439,11 +439,15 @@ class Game:
             self.sram_enbit = max(bit, 0x10)
             self.sram_slot_banks = 1
         elif mapper == MAPPER_GM2:
-            # Game Master 2, patched by gm2_to_yamanooto.py. K5 mode + GM2 SRAM
-            # helper variant (2 pages of 4KB; page-tagged commit log, single-bank
-            # save slots). Enable bit fixed at 0x10, page select at 0x20.
+            # Game Master 2, bespoke-patched by gm2_to_yamanooto.py. Runs in
+            # NATIVE K4 mode (GM2's bank regs are Konami4's) with its SRAM-disk
+            # driver redirected to a RAM shadow + flash save image at relative
+            # bank 0x10 (start of the reserved 64KB sector). No resident helper
+            # is installed (FLAG_SRAM off): GM2 is a resident cart that owns
+            # high RAM, so everything lives in its own patched ROM instead.
+            # sram_type is kept so the packer reserves the save sector.
             self.banks = (0, 1, 2, 3)
-            self.flags = FLAG_SRAM
+            self.flags = FLAG_K4
             self.sram_type = SRAM_TYPE_GM2
             self.sram_enbit = 0x10
             self.sram_slot_banks = 1

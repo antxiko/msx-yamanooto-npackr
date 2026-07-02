@@ -1,93 +1,147 @@
 #!/usr/bin/env python3
 """
-gm2_to_yamanooto.py — Convert Konami's Game Master 2 for the Yamanooto
-SRAM-emulation helper (GameMaster2 variant).
+gm2_to_yamanooto.py — bespoke Yamanooto patch for Konami's Game Master 2.
 
-GM2's mapper writes go to 0x6000-0x6FFF / 0x8000-0x8FFF / 0xA000-0xAFFF with
-address bit 12 clear. Every `LD (nn),A` (opcode 0x32) hitting those windows is
-rewritten into a CALL to the resident helper entry for that region:
+GM2 is a RESIDENT cartridge: it owns high RAM (0xF0xx-0xF3xx) and uses the
+RAM under page 2 as its workspace, which makes it incompatible with the
+generic SRAM helper. Instead, this converter patches GM2 itself:
 
-  0x6xxx (region 1, 0x6000-0x7FFF)  -> CALL 0xF033
-  0x8xxx (region 2, 0x8000-0x9FFF)  -> CALL 0xF036
-  0xAxxx (region 3, 0xA000-0xBFFF)  -> CALL 0xF039
+- ROM banking runs NATIVELY in the Yamanooto's K4 mode (GM2's registers
+  0x6000/0x8000/0xA000 are Konami4's). No CALL rewriting, no resident code.
+- All SRAM traffic flows through GM2's own "SRAM disk" driver (ROM bank 4,
+  0x8000-0x8679, entered only via the trampoline at ROM 0x0020). We patch:
+    1. The trampoline: instead of enabling cart SRAM, it maps bank 4 into the
+       0x6000 window and calls our stage-1 (ROM 0x8680 = CPU 0x6680).
+    2. Stage 1 switches page 2 to the system RAM slot (GM2 keeps its RAM slot
+       id at 0xF2A0), copies the whole patched bank 4 to RAM 0x8000-0x9FFF
+       and jumps to stage 2 in that copy.
+    3. Stage 2 (ROM 0x8700+, runs in RAM): loads an 8KB SRAM shadow from the
+       save flash bank (relative bank 0x10, right after the 128KB ROM), calls
+       the driver (which now reads/writes the shadow), and for write-class
+       functions flushes the shadow back to flash (AMD sector erase + program,
+       possible because the code runs from RAM).
+    4. Driver patches: every `LD (0xA000),A` page-select/enable is NOPped
+       (page 2 is RAM during the driver — those writes would corrupt the
+       shadow); the two computed data-pointer bases (`LD DE,0xB000` at ROM
+       0x840E and 0x854D) become CALL 0x8700 (fix: page 0 -> 0xB000, page 1 ->
+       0xA000, the mirror the driver never touches — so the 2x4KB SRAM lives
+       linearly in the shadow); FORMAT's two-page clear becomes one linear
+       8KB clear.
 
-The bank value stays in A: bit4 = SRAM select, bit5 = SRAM page, bits 0-3 =
-8KB ROM bank. The launcher installs the GM2 helper variant when the directory
-entry has FLAG_SRAM and the SRAM table types the game as GM2 (type 1).
-
-Known dumps (expected patch counts r1/r2/r3):
-  fe74b4df9698a61dffd3ac88f47619675514ba1c  (GameMaster2)         4/20/50
-A count mismatch on a known dump aborts; unknown dumps only warn.
+Verified against dump SHA1 fe74b4df9698a61dffd3ac88f47619675514ba1c
+(GameMaster2 type in the openMSX softdb). Other dumps: patched with warnings.
 
 Usage:
   gm2_to_yamanooto.py in.rom out.rom
+(needs launcher/gm2_part1.bin and gm2_part2.bin, built from the .asm sources)
 """
 
 import sys
 from pathlib import Path
 
-SRAM_HELPER_BASE = 0xF030   # must match SRAM_HELPER_DST in launcher.asm
+KNOWN_SHA1 = "fe74b4df9698a61dffd3ac88f47619675514ba1c"
 
-KNOWN_COUNTS = {
-    "fe74b4df9698a61dffd3ac88f47619675514ba1c": (4, 20, 50),
-}
+BANK4 = 0x8000                # ROM offset of the driver bank
+BANK4_CODE_END = 0x8680       # driver code ends 0x8679; blob starts 0x8680
+BLOB1_OFF = 0x8680            # stage 1 (CPU 0x6680 via the 0x6000 window)
+BLOB2_OFF = 0x8700            # fix2 + stage 2 (CPU 0x8700 in the RAM copy)
+
+# trampoline patch @ROM 0x002E (16 bytes, replaces bank4@0x8000 + SRAM-enable
+# + CALL 0x8000):  bank4@window / pop bc,de / push de / CALL 0x6680 /
+# EX AF,AF' (recovers driver status stashed by stage 2) / 4x NOP
+TRAMP_OFF = 0x002E
+TRAMP_OLD = bytes.fromhex("3e 04 32 00 80 3e 10 32 00 a0 c1 d1 d5 cd 00 80".replace(" ", ""))
+TRAMP_NEW = bytes.fromhex("3e 04 32 00 60 c1 d1 d5 cd 80 66 08 00 00 00 00".replace(" ", ""))
+
+# the two computed page-select data-pointer bases -> CALL 0x8700 (fix2)
+PTR_SITES = (0x840E, 0x854D)  # both: 11 00 B0 (LD DE,0xB000)
+
+# FORMAT clear rewrite @0x84C1: one linear 8KB clear of the shadow
+FMT_OFF = 0x84C1
+FMT_OLD = bytes.fromhex("3e 10 cd c8 84 3e 30 32 00 a0 21 00 b0 11 01 b0".replace(" ", ""))
+FMT_NEW = bytes.fromhex("21 00 a0 11 01 a0 01 ff 1f 36 00 ed b0 c9 ff ff".replace(" ", ""))
+# note: FMT_NEW ends the routine at its RET; trailing old bytes (LDIR tail of
+# the original, unreachable) are replaced by 0xFF filler up to 0x84D1, and the
+# original 01 FF 0F / 36 00 / ED B0 / C9 at 0x84D1-0x84D8 stay but are dead.
 
 
-def convert(rom: bytes) -> tuple[bytes, list]:
-    """Patch every GM2 bank-register write into a helper CALL.
-    Returns (patched_rom, patches) with patches = [(offset, old_nn, region)]."""
+def convert(rom: bytes, part1: bytes, part2: bytes) -> tuple[bytes, dict]:
+    if len(rom) != 128 * 1024:
+        raise RuntimeError(f"GM2 ROM must be 128KB, got {len(rom)}")
     out = bytearray(rom)
-    patches = []
-    i = 0
-    while i < len(out) - 2:
-        if out[i] == 0x32:                      # LD (nn), A
-            hi = out[i + 2]
-            if (hi & 0x10) == 0:                # GM2 regs need bit12 clear
-                region = None
-                if 0x60 <= hi <= 0x6F:
-                    region = 1
-                elif 0x80 <= hi <= 0x8F:
-                    region = 2
-                elif 0xA0 <= hi <= 0xAF:
-                    region = 3
-                if region is not None:
-                    target = SRAM_HELPER_BASE + 3 * region
-                    old_nn = (hi << 8) | out[i + 1]
-                    out[i] = 0xCD               # CALL nn
-                    out[i + 1] = target & 0xFF
-                    out[i + 2] = target >> 8
-                    patches.append((i, old_nn, region))
-        i += 1
-    return bytes(out), patches
+    stats = {}
+
+    # --- 1. trampoline ---
+    if bytes(out[TRAMP_OFF:TRAMP_OFF + 16]) != TRAMP_OLD:
+        raise RuntimeError("trampoline bytes at 0x002E don't match — wrong dump?")
+    out[TRAMP_OFF:TRAMP_OFF + 16] = TRAMP_NEW
+    stats["trampoline"] = 1
+
+    # --- 2. NOP every LD (0xA000),A store inside the driver bank code ---
+    n = 0
+    i = BANK4
+    while i < BANK4 + 0x679:
+        if out[i] == 0x32 and out[i + 1] == 0x00 and out[i + 2] == 0xA0:
+            out[i:i + 3] = b"\x00\x00\x00"
+            n += 1
+            i += 3
+        else:
+            i += 1
+    stats["enables_nopped"] = n
+
+    # --- 3. data-pointer bases -> CALL fix2 (0x8700) ---
+    for off in PTR_SITES:
+        if bytes(out[off:off + 3]) != b"\x11\x00\xB0":
+            raise RuntimeError(f"expected LD DE,0xB000 at 0x{off:04X}")
+        out[off:off + 3] = b"\xCD\x00\x87"
+    stats["ptr_fixes"] = len(PTR_SITES)
+
+    # --- 4. FORMAT clear rewrite (enables inside already NOPped by step 2;
+    #        re-check the region against the post-step-2 expectation) ---
+    expect = bytearray(FMT_OLD)
+    expect[7:10] = b"\x00\x00\x00"          # step 2 NOPped the 32 00 A0
+    if bytes(out[FMT_OFF:FMT_OFF + 16]) != bytes(expect):
+        raise RuntimeError("FORMAT region at 0x84C1 doesn't match — wrong dump?")
+    out[FMT_OFF:FMT_OFF + 16] = FMT_NEW
+    stats["format_rewrite"] = 1
+
+    # --- 5. embed the blob in bank 4 free space ---
+    if any(b != 0xFF for b in out[BLOB1_OFF:BLOB1_OFF + len(part1)]):
+        raise RuntimeError("bank-4 free space at 0x8680 is not empty")
+    if any(b != 0xFF for b in out[BLOB2_OFF:BLOB2_OFF + len(part2)]):
+        raise RuntimeError("bank-4 free space at 0x8700 is not empty")
+    if BLOB1_OFF + len(part1) > BLOB2_OFF:
+        raise RuntimeError("stage 1 blob overlaps stage 2")
+    out[BLOB1_OFF:BLOB1_OFF + len(part1)] = part1
+    out[BLOB2_OFF:BLOB2_OFF + len(part2)] = part2
+    stats["blob"] = len(part1) + len(part2)
+
+    return bytes(out), stats
 
 
-def check_counts(rom: bytes, patches: list) -> None:
-    import hashlib
-    sha = hashlib.sha1(rom).hexdigest()
-    counts = [0, 0, 0, 0]
-    for _, _, r in patches:
-        counts[r] += 1
-    got = (counts[1], counts[2], counts[3])
-    if sha in KNOWN_COUNTS:
-        if got != KNOWN_COUNTS[sha]:
-            raise RuntimeError(
-                f"GM2 dump {sha[:12]}: patch counts {got} != expected "
-                f"{KNOWN_COUNTS[sha]} — converter or dump mismatch")
-    else:
-        print(f"[gm2] unknown dump {sha[:12]}: patched r1/r2/r3 = {got} "
-              f"(no reference counts, verify in-game)", file=sys.stderr)
+def load_blobs(base: Path) -> tuple[bytes, bytes]:
+    p1 = (base / "gm2_part1.bin").read_bytes()
+    p2 = (base / "gm2_part2.bin").read_bytes()
+    return p1, p2
 
 
 def main():
     if len(sys.argv) != 3:
         print("Usage: gm2_to_yamanooto.py in.rom out.rom", file=sys.stderr)
         sys.exit(1)
+    import hashlib
     src = Path(sys.argv[1]).read_bytes()
-    dst, patches = convert(src)
-    check_counts(src, patches)
+    sha = hashlib.sha1(src).hexdigest()
+    if sha != KNOWN_SHA1:
+        print(f"[gm2] WARNING: dump {sha[:12]} is not the verified one "
+              f"({KNOWN_SHA1[:12]}); byte checks may abort.", file=sys.stderr)
+    here = Path(__file__).resolve().parent.parent / "launcher"
+    part1, part2 = load_blobs(here)
+    dst, stats = convert(src, part1, part2)
     Path(sys.argv[2]).write_bytes(dst)
-    print(f"Patched {len(patches)} GM2 bank-register writes into helper CALLs")
-    print("Pack with `mapper = \"gm2\"`.")
+    print(f"GM2 bespoke patch applied: {stats}")
+    print("Pack with `mapper = \"gm2\"` (runs in native K4 mode; save image at "
+          "relative flash bank 0x10).")
 
 
 if __name__ == "__main__":
