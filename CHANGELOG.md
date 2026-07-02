@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.00 — 2026-07-02
 
 - **NEW: configurable menu colours.** Text, background and title-box colours are
   now selectable from the packager. New bytes in the `YMNTCFG!` config block
