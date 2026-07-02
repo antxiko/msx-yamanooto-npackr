@@ -105,12 +105,43 @@ FLAG_MDIS   equ 0x02        ; small ROM, lock mapping
 FLAG_PSGMUTE equ 0x04
 FLAG_ASCII16 equ 0x08       ; install ASCII16->K5 helper at 0xF000 before launch
 FLAG_SCC_HELPER equ 0x10    ; install SCC enable helper at 0xF020 (avoids 4x mirror)
+FLAG_SRAM   equ 0x20        ; SRAM-emulation game: install sram helper at 0xF070,
+                            ; save area = 64KB flash sector (see SRAM table, bank 14)
 ; bits 5-7 reserved
 
 ASCII16_HELPER_DST equ 0xF000   ; RAM destination for the ASCII16 helper
 P_SCC_OFFR_COMP    equ 0xF018   ; OFFR compensated for SCC enable write (1 byte)
 P_SCC_OFFR_NORM    equ 0xF019   ; OFFR normal for the game (1 byte)
 SCC_HELPER_DST     equ 0xF020   ; RAM destination for the SCC enable helper
+
+;------------------------------------------------------------------------------
+; SRAM-emulation helper: parameter block (0xF000) + resident code (0xF030).
+; Installed by launch_game when the entry has FLAG_SRAM. The game's bank-switch
+; writes are patched by the packager into CALL SRAM_HELPER_DST+3*region.
+; NOTE: this REUSES the ASCII16/SCC helper area — an SRAM game never sets
+; FLAG_ASCII16/FLAG_SCC_HELPER (its converter subsumes both behaviours).
+;------------------------------------------------------------------------------
+P_SR_TYPE    equ 0xF000   ; 1=GM2 2=ASCII8SRAM8 3=ASCII16SRAM2 4=ASCII8SRAM2
+P_SR_ENBIT   equ 0xF001   ; bank-value bit that selects SRAM (A8: nbanks; else 0x10)
+P_SR_SECREL  equ 0xF002   ; save sector base bank, relative to the game (OFFR*4)
+P_SR_SLOTBK  equ 0xF003   ; 8KB banks per save slot (A8: 1, GM2: 2)
+P_SR_NSLOTS  equ 0xF004   ; save slots per sector (A8: 7, GM2: 3)
+P_SR_SLOT    equ 0xF005   ; current committed slot (0xFF = none yet)
+P_SR_DIRTY   equ 0xF006   ; shadow modified since last flush
+P_SR_FLIP    equ 0xF007   ; page 2 currently flipped to system RAM
+P_SR_A8GAME  equ 0xF008   ; primary slot reg value while the game runs
+P_SR_A8FLIP  equ 0xF009   ; same with page 2 pointing at the RAM slot
+P_SR_EXP     equ 0xF00A   ; RAM lives in an expanded slot (use 0xFFFF too)
+P_SR_SUBGAME equ 0xF00B   ; RAM-slot secondary reg value, game state
+P_SR_SUBFLIP equ 0xF00C   ; same with page 2 = RAM's page-3 subslot
+P_SR_SLTTBL  equ 0xF00D   ; 2 bytes: address of SLTTBL[RAM P3 slot] (0 if !EXP)
+P_SR_BANKS   equ 0xF00F   ; 4 bytes: game's view of the 4 bank regs (ROM banks)
+P_SR_STATE   equ 0xF013   ; 4 bytes/region: 0x00=ROM, else 0x80|sram_page
+P_SR_ERR     equ 0xF017   ; sticky error flag (flush/verify failed)
+SRAM_HELPER_DST equ 0xF030 ; resident code (entries at +0/+3/+6/+9)
+SRAM_CODE_MAX   equ 0x0310 ; hard budget: 0xF030-0xF33F (stack cushion above)
+SLTTBL       equ 0xFCC5   ; BIOS: secondary-slot reg copies, 1 byte per primary
+EXPTBL       equ 0xFCC1   ; BIOS: bit7 set if primary slot is expanded
 
 ;------------------------------------------------------------------------------
 ; Directory location (set by packager — banks 4..15 reserved, dir bank is the last)
@@ -143,6 +174,8 @@ pgbuf         equ RAM_BASE + 50   ; 14 bytes: "PAG x/y" text buffer
 v_col_normal  equ RAM_BASE + 64   ; 1 byte: text row colour  = text<<4 | bg
 v_col_hilite  equ RAM_BASE + 65   ; 1 byte: selection bar    = bg<<4 | text (inverse)
 v_col_box     equ RAM_BASE + 66   ; 1 byte: title box edges   = box<<4 | bg
+sel_index     equ RAM_BASE + 67   ; 2 bytes: directory index of the launched game
+                                  ; (needed to look up its SRAM-table entry)
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -532,13 +565,16 @@ menu_prev_ok:
     call menu_redraw_list
     jp   main_loop
 
-; Return HL = pointer to selected entry in paged-in flash (0xA000+ region)
+; Return HL = pointer to selected entry in paged-in flash (0xA000+ region).
+; Also records the directory index in sel_index (the SRAM table is indexed
+; by directory position).
 menu_get_selected:
     ld   a, (menu_cursor)
     ld   d, 0
     ld   e, a
     ld   hl, (menu_top)
     add  hl, de
+    ld   (sel_index), hl
     ld   b, h
     ld   c, l
     call dir_get_entry
@@ -746,6 +782,13 @@ launch_game:
     ld   bc, 4
     ldir
 
+    ; SRAM-emulation game? Set up params + install the resident helper.
+    ; Done here (still running from launcher ROM, no size pressure) so the
+    ; trampoline block does not grow.
+    ld   a, (entry_cache + DIR_FLAGS)
+    and  FLAG_SRAM
+    call nz, sram_setup
+
     ; Copy trampoline code to RAM
     ld   hl, trampoline_src
     ld   de, TRAMP_RAM
@@ -916,6 +959,741 @@ scc_helper:
 scc_helper_end:
 
 trampoline_end:
+
+;==============================================================================
+; SRAM EMULATION (FLAG_SRAM games)
+;------------------------------------------------------------------------------
+; The Yamanooto has no physical SRAM, but its flash IS runtime-writable via
+; ENAR.WREN. Strategy (see docs/SRAM_DESIGN.md):
+;   - The packager patches every game bank-register write into
+;     CALL SRAM_HELPER_DST + 3*region (bank value still in A).
+;   - The resident helper keeps a software copy of the mapper state.
+;   - SRAM selected in page 1 (read-only by HW in all supported mappers):
+;     map the current save slot's flash bank into that window.
+;   - SRAM selected in page 2: FLIP the CPU's page 2 to the system RAM slot
+;     ("shadow"). The SRAM half is rebuilt from the save slot in flash, the
+;     other half gets a copy of its mapped ROM bank so reads/ISRs stay valid.
+;     Arbitrary game writes (LD (HL),A / LDIR...) then land in real RAM.
+;   - On SRAM deselect (or page-1 remap) a dirty shadow is FLUSHED to a save
+;     slot in the game's dedicated 64KB flash sector (log-structured: program
+;     slots 0..N-1, sector-erase only when full; commit byte written last).
+; Save sector layout (64KB): banks 0..5 = save slots, bank 7 = META:
+;   +0 "YSAV" +4 ver +5 type +6 slot_banks; +0x10 commit log (1 byte/slot,
+;   0xFF=free, 0x00=committed, 0x0F=bad).
+; Constraint (verified in openMSX AmdFlash/Yamanooto): WREN=1 sends writes in
+; 0x4000-0xBFFF to the AMD command interpreter AND freezes banking — bank regs
+; must be set BEFORE raising WREN. Unlock addresses 0xAAA/0x555 are reachable
+; from any 8KB window (matcher masks (addr>>1)&0x7FF).
+;==============================================================================
+
+;------------------------------------------------------------------------------
+; sram_setup — called from launch_game (DI, running from launcher ROM) when
+; the entry has FLAG_SRAM. Reads the game's SRAM-table entry (flash bank 14),
+; scans the save sector's commit log, precomputes slot-flip values and installs
+; the resident helper variant at SRAM_HELPER_DST.
+;------------------------------------------------------------------------------
+SRAM_TABLE_BANK equ 14
+
+sram_setup:
+    ld   a, ENAR_REGEN
+    ld   (YAMA_ENAR), a         ; open REGEN (OFFR writes below)
+    ld   a, SRAM_TABLE_BANK
+    ld   (MAP_BANK3), a         ; 0xA000+ = SRAM table (OFFR=0 in the menu)
+    ; magic "YSRT"?
+    ld   hl, 0xA000
+    ld   a, (hl)
+    cp   'Y'
+    jp   nz, srs_table_bad
+    inc  hl
+    ld   a, (hl)
+    cp   'S'
+    jp   nz, srs_table_bad
+    inc  hl
+    ld   a, (hl)
+    cp   'R'
+    jp   nz, srs_table_bad
+    inc  hl
+    ld   a, (hl)
+    cp   'T'
+    jp   nz, srs_table_bad
+    ; entry = 0xA008 + sel_index*8
+    ld   hl, (sel_index)
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    ld   de, 0xA008
+    add  hl, de
+    ld   e, (hl)                ; sector_bank low
+    inc  hl
+    ld   d, (hl)                ; sector_bank high (unused: SECREL is 8-bit)
+    inc  hl
+    ld   a, (hl)                ; sram_type
+    or   a
+    jp   z, srs_table_bad
+    cp   0xFF
+    jp   z, srs_table_bad
+    ld   (P_SR_TYPE), a
+    inc  hl
+    ld   a, (hl)                ; enable bit
+    ld   (P_SR_ENBIT), a
+    inc  hl
+    ld   a, (hl)                ; banks per slot
+    ld   (P_SR_SLOTBK), a
+    cp   2
+    ld   a, 7                   ; 1 bank/slot -> 7 slots (bank 7 = META)
+    jr   nz, srs_nslots
+    ld   a, 3                   ; 2 banks/slot -> 3 slots
+srs_nslots:
+    ld   (P_SR_NSLOTS), a
+    ; SECREL = (sector_bank - OFFR*4) & 0xFF  (fits by construction)
+    ld   a, (P_OFFR)
+    add  a, a
+    add  a, a
+    ld   b, a
+    ld   a, e
+    sub  b
+    ld   (P_SR_SECREL), a
+    ; --- scan the commit log (META bank needs the game's OFFR) ---
+    ld   a, (P_OFFR)
+    ld   (YAMA_OFFR), a
+    ld   a, (P_SR_SECREL)
+    add  a, 7
+    ld   (MAP_BANK3), a         ; META bank at 0xA000 (commits new OFFR)
+    ld   hl, 0xA000
+    ld   a, (hl)
+    cp   'Y'
+    jr   nz, srs_no_meta        ; sector never initialised -> no saves yet
+    inc  hl
+    ld   a, (hl)
+    cp   'S'
+    jr   nz, srs_no_meta
+    inc  hl
+    ld   a, (hl)
+    cp   'A'
+    jr   nz, srs_no_meta
+    inc  hl
+    ld   a, (hl)
+    cp   'V'
+    jr   nz, srs_no_meta
+    ; find the LAST committed slot (0x00) in the log
+    ld   hl, 0xA010
+    ld   a, (P_SR_NSLOTS)
+    ld   b, a
+    ld   c, 0xFF                ; best so far = none
+    ld   e, 0                   ; slot index
+srs_scan:
+    ld   a, (hl)
+    or   a
+    jr   nz, srs_scan_next
+    ld   c, e                   ; committed: remember (keep scanning: latest wins)
+srs_scan_next:
+    inc  hl
+    inc  e
+    djnz srs_scan
+    ld   a, c
+    jr   srs_have_slot
+srs_no_meta:
+    ld   a, 0xFF
+srs_have_slot:
+    ld   (P_SR_SLOT), a
+    jr   srs_restore
+srs_table_bad:
+    ; Corrupt/missing table: install the helper anyway so the game's patched
+    ; CALLs stay valid, but with NSLOTS=0 any flush fails fast into P_SR_ERR
+    ; (game runs, saves don't persist).
+    ld   a, 0xFF
+    ld   (P_SR_SLOT), a
+    xor  a
+    ld   (P_SR_NSLOTS), a
+    ld   (P_SR_SECREL), a
+    ld   a, 2
+    ld   (P_SR_TYPE), a
+    ld   a, 0x10
+    ld   (P_SR_ENBIT), a
+    ld   a, 1
+    ld   (P_SR_SLOTBK), a
+srs_restore:
+    xor  a
+    ld   (YAMA_OFFR), a         ; OFFR back to the menu's 0
+    ld   a, DIR_BANK
+    ld   (MAP_BANK3), a         ; directory back in
+    xor  a
+    ld   (YAMA_ENAR), a         ; lock regs (trampoline reopens them)
+    ; --- runtime state ---
+    xor  a
+    ld   (P_SR_DIRTY), a
+    ld   (P_SR_FLIP), a
+    ld   (P_SR_ERR), a
+    ld   (P_SR_EXP), a
+    ld   hl, P_SR_BANKS
+    ld   (hl), 0
+    inc  hl
+    ld   (hl), 1
+    inc  hl
+    ld   (hl), 2
+    inc  hl
+    ld   (hl), 3
+    inc  hl                     ; -> P_SR_STATE
+    xor  a                      ; 0x00 = ROM everywhere
+    ld   (hl), a
+    inc  hl
+    ld   (hl), a
+    inc  hl
+    ld   (hl), a
+    inc  hl
+    ld   (hl), a
+    ; --- precompute slot-flip register values ---
+    in   a, (0xA8)
+    ld   (P_SR_A8GAME), a
+    ld   b, a
+    and  0xCF                   ; clear page-2 bits
+    ld   c, a
+    ld   a, b
+    rrca
+    rrca                        ; page-3 slot bits (6-7) -> page-2 (4-5)
+    and  0x30
+    or   c
+    ld   (P_SR_A8FLIP), a
+    ld   a, b
+    rlca
+    rlca                        ; page-3 primary slot number -> bits 0-1
+    and  0x03
+    ld   c, a
+    ld   b, 0
+    ld   hl, EXPTBL
+    add  hl, bc
+    bit  7, (hl)
+    jr   z, srs_not_exp
+    ld   a, 1
+    ld   (P_SR_EXP), a
+    ld   hl, SLTTBL
+    add  hl, bc
+    ld   (P_SR_SLTTBL), hl
+    ld   a, (hl)
+    ld   (P_SR_SUBGAME), a
+    ld   b, a
+    and  0xCF
+    ld   c, a
+    ld   a, b
+    rrca
+    rrca
+    and  0x30
+    or   c
+    ld   (P_SR_SUBFLIP), a
+srs_not_exp:
+    ; --- install the mapper variant (phase A: ASCII8-SRAM only) ---
+    ld   hl, sram_a8_src
+    ld   de, SRAM_HELPER_DST
+    ld   bc, sram_a8_end - sram_a8_src
+    ldir
+    ret
+
+;------------------------------------------------------------------------------
+; SRAM helper, ASCII8-SRAM variant. Assembled here in ROM, executed at
+; SRAM_HELPER_DST (0xF070): every absolute internal reference is written as
+; SRAM_HELPER_DST + (label - sram_a8_src), same relocation pattern as the
+; trampoline's helpers. Regions: 0=0x4000 1=0x6000 2=0x8000 3=0xA000; their
+; K5 bank regs: 0x5000/0x7000/0x9000/0xB000. A = bank value written by game.
+;------------------------------------------------------------------------------
+sram_a8_src:
+    jp   SRAM_HELPER_DST + (sra_r0 - sram_a8_src)   ; +0  region 0
+    jp   SRAM_HELPER_DST + (sra_r1 - sram_a8_src)   ; +3  region 1
+    jp   SRAM_HELPER_DST + (sra_r2 - sram_a8_src)   ; +6  region 2
+    jp   SRAM_HELPER_DST + (sra_r3 - sram_a8_src)   ; +9  region 3
+sra_r0:
+    push bc
+    ld   c, 0
+    jr   sra_common
+sra_r1:
+    push bc
+    ld   c, 1
+    jr   sra_common
+sra_r2:
+    push bc
+    ld   c, 2
+    jr   sra_common
+sra_r3:
+    push bc
+    ld   c, 3
+sra_common:
+    push af
+    push de
+    push hl
+    ld   b, a                   ; B = bank value
+    ld   a, i                   ; P/V = IFF2
+    push af
+    di
+    ld   a, (P_SR_ENBIT)
+    and  b
+    jp   nz, SRAM_HELPER_DST + (sra_sram - sram_a8_src)
+    ;=== ROM bank value ======================================================
+    ld   hl, P_SR_BANKS
+    ld   d, 0
+    ld   e, c
+    add  hl, de
+    ld   (hl), b                ; BANKS[c] = value
+    ld   hl, P_SR_STATE
+    add  hl, de
+    ld   a, (hl)
+    ld   (hl), 0                ; STATE[c] = ROM
+    add  a, a                   ; old bit7 (SRAM) -> carry
+    jr   nc, sra_rom_write      ; was ROM already: plain bank write
+    ; region was SRAM before
+    ld   a, c
+    cp   2
+    jr   c, sra_rom_write       ; page-1 view: overwrite the flash-map
+    ; page-2 region leaves SRAM: other page-2 region still SRAM?
+    ld   a, c
+    xor  1                      ; 2<->3
+    ld   e, a
+    ld   hl, P_SR_STATE
+    add  hl, de                 ; D is still 0
+    bit  7, (hl)
+    jr   z, sra_flipout
+    ; still flipped: materialise ROM bank B inside this shadow half
+    call SRAM_HELPER_DST + (sra_copy_to_half - sram_a8_src)
+    jr   sra_exit
+sra_flipout:
+    call SRAM_HELPER_DST + (sra_flush_if_dirty - sram_a8_src)
+    call SRAM_HELPER_DST + (sra_unflip - sram_a8_src)
+    ld   a, (P_SR_BANKS+2)      ; re-prime page-2 regs (both ROM now)
+    ld   (MAP_BANK2), a
+    ld   a, (P_SR_BANKS+3)
+    ld   (MAP_BANK3), a
+    jr   sra_exit
+sra_rom_write:
+    call SRAM_HELPER_DST + (sra_wr_bank - sram_a8_src)
+    jr   sra_exit
+    ;=== SRAM bank value =====================================================
+sra_sram:
+    ld   hl, P_SR_STATE
+    ld   d, 0
+    ld   e, c
+    add  hl, de
+    bit  7, (hl)
+    jr   nz, sra_exit           ; already SRAM here: nothing to do
+    ld   (hl), 0x80             ; STATE[c] = SRAM (ASCII8: single page)
+    ld   a, c
+    cp   2
+    jr   nc, sra_flipin
+    ; page-1 SRAM view is read-only by HW: flush pending changes, then map
+    ; the save slot's flash bank into this window.
+    call SRAM_HELPER_DST + (sra_flush_if_dirty - sram_a8_src)
+    call SRAM_HELPER_DST + (sra_slot_bank - sram_a8_src)
+    ld   b, a
+    call SRAM_HELPER_DST + (sra_wr_bank - sram_a8_src)
+    jr   sra_exit
+sra_flipin:
+    ld   a, (P_SR_FLIP)
+    or   a
+    jr   nz, sra_fi_this        ; already flipped: only build this half
+    call SRAM_HELPER_DST + (sra_flip - sram_a8_src)
+    ; other page-2 half: ROM while FLIP was 0 -> copy its mapped bank
+    ld   a, c
+    xor  1
+    ld   e, a
+    ld   d, 0
+    ld   hl, P_SR_BANKS
+    add  hl, de
+    push bc
+    ld   b, (hl)                ; B = other half's ROM bank
+    ld   c, e                   ; C = other region
+    call SRAM_HELPER_DST + (sra_copy_to_half - sram_a8_src)
+    pop  bc
+sra_fi_this:
+    call SRAM_HELPER_DST + (sra_load_half - sram_a8_src)
+    ld   a, 1
+    ld   (P_SR_DIRTY), a
+sra_exit:
+    pop  af                     ; P/V = saved IFF2
+    jp   po, SRAM_HELPER_DST + (sra_noei - sram_a8_src)
+    ei
+sra_noei:
+    pop  hl
+    pop  de
+    pop  af
+    pop  bc
+    ret
+
+; --- write B to region C's bank register (flip-aware) ------------------------
+sra_wr_bank:
+    ld   a, c
+    rrca
+    rrca
+    rrca                        ; C<<5
+    add  a, 0x50                ; 0x50/0x70/0x90/0xB0
+    ld   d, a
+    ld   e, 0
+    ld   a, c
+    cp   2
+    jr   c, sra_wb_direct       ; page-1 regs always show the cart
+    ld   a, (P_SR_FLIP)
+    or   a
+    jr   z, sra_wb_direct
+    ld   a, (P_SR_A8GAME)       ; momentary unflip (subslot regs keep state)
+    out  (0xA8), a
+    ld   a, b
+    ld   (de), a
+    ld   a, (P_SR_A8FLIP)
+    out  (0xA8), a
+    ret
+sra_wb_direct:
+    ld   a, b
+    ld   (de), a
+    ret
+
+; --- full flip in/out of page 2 ----------------------------------------------
+sra_flip:
+    ld   a, (P_SR_EXP)
+    or   a
+    jr   z, sra_fl_prim
+    ld   a, (P_SR_SUBFLIP)
+    ld   (0xFFFF), a            ; RAM slot: page-2 subslot = its page-3 one
+    push hl
+    ld   hl, (P_SR_SLTTBL)
+    ld   (hl), a                ; keep BIOS SLTTBL coherent
+    pop  hl
+sra_fl_prim:
+    ld   a, (P_SR_A8FLIP)
+    out  (0xA8), a
+    ld   a, 1
+    ld   (P_SR_FLIP), a
+    ret
+
+sra_unflip:
+    ld   a, (P_SR_A8GAME)
+    out  (0xA8), a
+    ld   a, (P_SR_EXP)
+    or   a
+    jr   z, sra_uf_done
+    ld   a, (P_SR_SUBGAME)
+    ld   (0xFFFF), a
+    push hl
+    ld   hl, (P_SR_SLTTBL)
+    ld   (hl), a
+    pop  hl
+sra_uf_done:
+    xor  a
+    ld   (P_SR_FLIP), a
+    ret
+
+; --- copy game ROM bank B into shadow half of region C (requires FLIP) -------
+sra_copy_to_half:
+    ld   a, b
+    ld   (MAP_BANK1), a         ; window 1 = source bank
+    ld   a, c
+    rrca
+    rrca
+    rrca                        ; C<<5
+    add  a, 0x40                ; region 2 -> 0x80, region 3 -> 0xA0
+    ld   d, a
+    ld   e, 0
+    ld   hl, 0x6000
+    push bc
+    ld   bc, 0x2000
+    ldir
+    pop  bc
+    jp   SRAM_HELPER_DST + (sra_restore_w1 - sram_a8_src)
+
+; --- build shadow half of region C from the save slot ------------------------
+; SLOT==0xFF resolves to the (erased = all 0xFF) slot-0 area, which equals
+; "SRAM without battery" for the game.
+sra_load_half:
+    call SRAM_HELPER_DST + (sra_slot_bank - sram_a8_src)
+    ld   b, a                   ; B (game value) no longer needed here
+    jp   SRAM_HELPER_DST + (sra_copy_to_half - sram_a8_src)
+
+; --- A = save-slot flash bank (game-relative); SLOT 0xFF -> slot-0 area ------
+sra_slot_bank:
+    push bc
+    ld   a, (P_SR_SLOT)
+    cp   0xFF
+    jr   nz, ssb_have
+    xor  a
+ssb_have:
+    ld   b, a
+    ld   a, (P_SR_SLOTBK)
+    dec  a
+    jr   z, ssb_one
+    sla  b                      ; 2 banks/slot
+ssb_one:
+    ld   a, (P_SR_SECREL)
+    add  a, b
+    pop  bc
+    ret
+
+; --- restore window 1 to the game's view (ROM bank or SRAM slot map) ---------
+sra_restore_w1:
+    ld   a, (P_SR_STATE+1)
+    bit  7, a
+    jr   z, srw1_rom
+    call SRAM_HELPER_DST + (sra_slot_bank - sram_a8_src)
+    jr   srw1_wr
+srw1_rom:
+    ld   a, (P_SR_BANKS+1)
+srw1_wr:
+    ld   (MAP_BANK1), a
+    ret
+
+; --- flush shadow -> flash save slot (log-structured) ------------------------
+sra_flush_if_dirty:
+    ld   a, (P_SR_FLIP)
+    or   a
+    ret  z
+    ld   a, (P_SR_DIRTY)
+    or   a
+    ret  z
+sra_flush:
+    ld   a, (P_SR_NSLOTS)
+    or   a
+    jr   nz, srf_go
+    ld   a, 1
+    ld   (P_SR_ERR), a
+    ret
+srf_go:
+    ; canonical source half = the page-2 region currently marked SRAM
+    ld   a, (P_SR_STATE+3)
+    bit  7, a
+    ld   h, 0xA0
+    jr   nz, srf_src_ok
+    ld   h, 0x80
+srf_src_ok:
+    ld   l, 0                   ; HL = shadow source (RAM, we are flipped)
+    ; compare-skip: identical to the committed slot? then nothing to do
+    ld   a, (P_SR_SLOT)
+    cp   0xFF
+    jr   z, srf_new
+    call SRAM_HELPER_DST + (sra_slot_bank - sram_a8_src)
+    ld   (MAP_BANK1), a
+    push hl
+    ld   de, 0x6000
+    ld   bc, 0x2000
+srf_cmp:
+    ld   a, (de)
+    cpi
+    jr   nz, srf_diff
+    inc  de
+    jp   pe, SRAM_HELPER_DST + (srf_cmp - sram_a8_src)
+    pop  hl
+    xor  a
+    ld   (P_SR_DIRTY), a        ; clean: no wear
+    jp   SRAM_HELPER_DST + (sra_restore_w1 - sram_a8_src)
+srf_diff:
+    pop  hl
+srf_new:
+    ld   a, (P_SR_SLOT)
+    inc  a                      ; 0xFF -> 0
+    ld   d, a                   ; D = candidate slot
+    ld   e, 0                   ; E = erase-done flag
+srf_try:
+    ld   a, (P_SR_NSLOTS)
+    dec  a
+    cp   d
+    jr   nc, srf_have           ; d <= NSLOTS-1
+    ld   a, e
+    or   a
+    jp   nz, SRAM_HELPER_DST + (srf_fail - sram_a8_src) ; wrapped twice: give up
+    ld   e, 1
+    call SRAM_HELPER_DST + (sra_erase_sector - sram_a8_src)
+    ld   a, (P_SR_ERR)
+    or   a
+    jp   nz, SRAM_HELPER_DST + (srf_fail - sram_a8_src)
+    ld   d, 0
+srf_have:
+    push de
+    push hl
+    ; window 1 = dest bank (MUST precede WREN: banking freezes under WREN)
+    ld   a, (P_SR_SLOTBK)
+    dec  a
+    ld   a, d
+    jr   z, srf_sb1
+    add  a, a
+srf_sb1:
+    ld   b, a
+    ld   a, (P_SR_SECREL)
+    add  a, b
+    ld   (MAP_BANK1), a
+    ld   a, ENAR_WREN
+    ld   (YAMA_ENAR), a
+    ld   de, 0x6000
+    ld   bc, 0x2000
+srf_pgm:
+    ld   a, (de)
+    cp   (hl)
+    jr   z, srf_pnext           ; byte already right (erased 0xFF or equal)
+    push bc
+    ld   c, (hl)
+    call SRAM_HELPER_DST + (sra_pgm_byte - sram_a8_src)
+    pop  bc
+    ld   a, (P_SR_ERR)
+    or   a
+    jr   nz, srf_bad
+srf_pnext:
+    inc  hl
+    inc  de
+    dec  bc
+    ld   a, b
+    or   c
+    jr   nz, srf_pgm
+    xor  a
+    ld   (YAMA_ENAR), a         ; WREN off
+    ; verify (plain array reads)
+    pop  hl
+    push hl
+    ld   de, 0x6000
+    ld   bc, 0x2000
+srf_vfy:
+    ld   a, (de)
+    cpi
+    jr   nz, srf_bad
+    inc  de
+    jp   pe, SRAM_HELPER_DST + (srf_vfy - sram_a8_src)
+    ; success: commit (programmed LAST -> power-safe)
+    pop  hl
+    pop  de
+    ld   a, d
+    push de
+    push hl
+    ld   b, 0x00
+    call SRAM_HELPER_DST + (sra_meta_byte - sram_a8_src)
+    pop  hl
+    pop  de
+    ld   a, (P_SR_ERR)
+    or   a
+    jp   nz, SRAM_HELPER_DST + (srf_fail - sram_a8_src)
+    ld   a, d
+    ld   (P_SR_SLOT), a
+    xor  a
+    ld   (P_SR_DIRTY), a
+    jp   SRAM_HELPER_DST + (sra_restore_w1 - sram_a8_src)
+srf_bad:
+    ; program/verify failed: give up (v1; next flush retries the next slot)
+    pop  hl
+    pop  de
+    jp   SRAM_HELPER_DST + (srf_fail - sram_a8_src)
+srf_fail:
+    ld   a, 1
+    ld   (P_SR_ERR), a
+    xor  a
+    ld   (YAMA_ENAR), a
+    jp   SRAM_HELPER_DST + (sra_restore_w1 - sram_a8_src)
+
+; --- program one flash byte: (DE) = C. WREN must already be ON. --------------
+sra_pgm_byte:
+    ld   a, 0xAA
+    ld   (0x6AAA), a
+    ld   a, 0x55
+    ld   (0x6555), a
+    ld   a, 0xA0
+    ld   (0x6AAA), a
+    ld   a, c
+    ld   (de), a
+    push bc
+    ld   b, 0                   ; 256 polls (~2.5ms) >> 60us program time
+spb_poll:
+    ld   a, (de)
+    cp   c
+    jr   z, spb_done
+    djnz spb_poll
+    ld   a, 1
+    ld   (P_SR_ERR), a
+spb_done:
+    pop  bc
+    ret
+
+; --- program META commit-log byte: log[A] = B --------------------------------
+sra_meta_byte:
+    push de
+    push bc
+    ld   c, b                   ; C = value
+    ld   e, a
+    ld   a, (P_SR_SECREL)
+    add  a, 7
+    ld   (MAP_BANK1), a         ; window 1 = META bank (before WREN)
+    ld   a, 0x10
+    add  a, e
+    ld   e, a
+    ld   d, 0x60                ; DE = 0x6010 + slot
+    ld   a, ENAR_WREN
+    ld   (YAMA_ENAR), a
+    call SRAM_HELPER_DST + (sra_pgm_byte - sram_a8_src)
+    xor  a
+    ld   (YAMA_ENAR), a
+    pop  bc
+    pop  de
+    ret
+
+; --- erase the save sector (~500ms, DI) and rewrite the META header ----------
+sra_erase_sector:
+    push bc
+    push de
+    ld   a, (P_SR_SECREL)
+    ld   (MAP_BANK1), a         ; any bank inside the sector selects it
+    ld   a, ENAR_WREN
+    ld   (YAMA_ENAR), a
+    ld   a, 0xAA
+    ld   (0x6AAA), a
+    ld   a, 0x55
+    ld   (0x6555), a
+    ld   a, 0x80
+    ld   (0x6AAA), a
+    ld   a, 0xAA
+    ld   (0x6AAA), a
+    ld   a, 0x55
+    ld   (0x6555), a
+    ld   a, 0x30
+    ld   (0x6000), a            ; sector erase
+    ld   bc, 0                  ; 65536-iteration poll (~2.7s worst case)
+sre_poll:
+    ld   a, (0x6000)
+    cp   0xFF
+    jr   z, sre_done
+    ld   d, 8
+sre_dly:
+    dec  d
+    jr   nz, sre_dly
+    dec  bc
+    ld   a, b
+    or   c
+    jr   nz, sre_poll
+    ld   a, 1
+    ld   (P_SR_ERR), a
+    jr   sre_exit
+sre_done:
+    ; rewrite META header: "YSAV", ver, type, slot_banks
+    xor  a
+    ld   (YAMA_ENAR), a
+    ld   a, (P_SR_SECREL)
+    add  a, 7
+    ld   (MAP_BANK1), a
+    ld   a, ENAR_WREN
+    ld   (YAMA_ENAR), a
+    ; first the two RAM-sourced bytes into the header staging spots
+    ld   a, (P_SR_TYPE)
+    ld   (SRAM_HELPER_DST + (sre_hdr + 5 - sram_a8_src)), a
+    ld   a, (P_SR_SLOTBK)
+    ld   (SRAM_HELPER_DST + (sre_hdr + 6 - sram_a8_src)), a
+    ld   de, 0x6000
+    ld   hl, SRAM_HELPER_DST + (sre_hdr - sram_a8_src)
+    ld   b, 7
+sre_hloop:
+    ld   c, (hl)
+    call SRAM_HELPER_DST + (sra_pgm_byte - sram_a8_src)
+    inc  hl
+    inc  de
+    djnz sre_hloop
+sre_exit:
+    xor  a
+    ld   (YAMA_ENAR), a
+    pop  de
+    pop  bc
+    ret
+sre_hdr:
+    db   "YSAV", 1, 0, 0        ; +5/+6 patched with TYPE/SLOTBK before use
+sram_a8_end:
+
+; Hard budget check: the installed helper must fit 0xF070-0xF2FF.
+    ds   SRAM_CODE_MAX - (sram_a8_end - sram_a8_src), 0xFF
 
 ;==============================================================================
 ; STRING / PRINT HELPERS

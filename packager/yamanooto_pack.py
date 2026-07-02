@@ -54,6 +54,20 @@ FLAG_MDIS       = 0x02
 FLAG_PSGMUTE    = 0x04
 FLAG_ASCII16    = 0x08
 FLAG_SCC_HELPER = 0x10
+FLAG_SRAM       = 0x20             # SRAM-emulation game (launcher installs helper)
+
+# SRAM emulation: per-game 64KB save sector + lookup table in flash bank 14.
+# Table format ("YSRT"): +0 magic, +4 ver, +8 entries of 8 bytes indexed by
+# DIRECTORY position: u16 sector_bank(8KB units), u8 type, u8 enable_bit,
+# u8 slot_banks, 3 reserved 0xFF. Non-SRAM entries = 8x 0xFF.
+# Sector layout: banks 0..5 save slots, bank 7 META ("YSAV" hdr + commit log).
+SRAM_TABLE_BANK   = 14
+SRAM_TABLE_OFFSET = SRAM_TABLE_BANK * BANK_SIZE    # 0x1C000
+SAVE_SECTOR_SIZE  = 0x10000        # one AMD 64KB sector per SRAM game
+SRAM_TYPE_GM2         = 1
+SRAM_TYPE_ASCII8SRAM  = 2
+SRAM_TYPE_ASCII16SRAM = 3
+SRAM_TYPE_ASCII8SRAM2 = 4
 
 # Mapper kinds recognized by the packager (sourced from konami_catalog.toml etc.)
 MAPPER_SCC        = 'scc'          # KonamiSCC, K4=0, banks 0,1,2,3 — assumes SCC sound
@@ -62,6 +76,9 @@ MAPPER_K5         = 'k5'           # K5 mapper but no SCC sound (e.g. ASCII8 con
 MAPPER_K4         = 'k4'           # Konami (no SCC), K4=1, banks 0,1,2,3
 MAPPER_PLAIN      = 'plain'        # Mirrored/0x4000, K4=1, MDIS=1, mirror banks
 MAPPER_ASCII16_K5 = 'ascii16_k5'   # ROM patched by ascii16_to_k5.py — needs helper
+MAPPER_ASCII8_SRAM = 'ascii8_sram' # ASCII8+SRAM patched by ascii8sram_to_k5.py —
+                                    # launcher installs the SRAM-emulation helper
+                                    # and a 64KB flash save sector is reserved.
 
 # -----------------------------------------------------------------------------
 # Mapper auto-detection via openMSX softwaredb (SHA1 -> mapper type)
@@ -364,6 +381,11 @@ class Game:
         # writes a copy of the game's last bank at flash bank (OFFR*4 + 63)
         # so the SCC enable trick (LD A,0x3F : LD (0x9000),A) lands on music.
         self.needs_wrap_mirror = False
+        # SRAM emulation (FLAG_SRAM games only)
+        self.sram_type = None                 # SRAM_TYPE_* or None
+        self.sram_enbit = 0                   # bank-value bit that selects SRAM
+        self.sram_slot_banks = 1              # 8KB banks per save slot
+        self.save_sector_bank = None          # filled by packer (8KB bank units)
 
         size = len(data)
         if mapper == MAPPER_SCC:
@@ -399,6 +421,21 @@ class Game:
             self.flags = FLAG_ASCII16
             if size < 512 * 1024:
                 self.needs_wrap_mirror = True
+        elif mapper == MAPPER_ASCII8_SRAM:
+            # ROM already patched by ascii8sram_to_k5.py (all bank writes ->
+            # CALL 0xF030+3n). Runs in K5 mode; the launcher installs the SRAM
+            # helper via FLAG_SRAM and the packer reserves a 64KB save sector
+            # right after the game data (64KB-aligned).
+            self.banks = (0, 1, 2, 3)
+            self.flags = FLAG_SRAM
+            self.sram_type = SRAM_TYPE_ASCII8SRAM
+            # openMSX RomAscii8_8: enable bit = number of 8KB banks (pow2, >= 0x10)
+            nbanks = max(1, (size + BANK_SIZE - 1) // BANK_SIZE)
+            bit = 1
+            while bit < nbanks:
+                bit <<= 1
+            self.sram_enbit = max(bit, 0x10)
+            self.sram_slot_banks = 1
         else:
             raise ValueError(f"Unknown mapper {mapper!r}")
 
@@ -440,8 +477,11 @@ def pack_games(games, *, skip_overflow=False):
             occupied[i] = True
 
     # Partition games
-    scc_games = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5)]
-    non_scc   = [g for g in games if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5)]
+    scc_games  = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5)]
+    sram_games = [g for g in games if g.sram_type is not None]
+    non_scc    = [g for g in games
+                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5)
+                  and g.sram_type is None]
 
     # Sort SCC games by size descending (place biggest first to avoid fragmentation).
     scc_games.sort(key=lambda g: -len(g.data))
@@ -480,6 +520,34 @@ def pack_games(games, *, skip_overflow=False):
                 dropped.append(g)
             else:
                 raise RuntimeError(f"No 16-aligned slot free for {g.title!r}")
+
+    # Pass 1b: SRAM games. Data footprint rounded up to 64KB (2 OFFR units)
+    # so the 64KB save sector right after it is sector-aligned in flash.
+    # Total reservation = data + 1 sector; start OFFR must be even.
+    sram_games.sort(key=lambda g: -len(g.data))
+    for g in sram_games:
+        size_units = max(1, (len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT)
+        data_units = _align_up(size_units, 2)
+        total_units = data_units + 2          # + 64KB save sector
+        placed_here = False
+        start = _align_up(GAMES_POOL_START // OFFR_UNIT, 2)
+        while start + total_units <= n_slots:
+            if all(not occupied[i] for i in range(start, start + total_units)):
+                for i in range(start, start + total_units):
+                    occupied[i] = True
+                g.offr = start
+                g.flash_offset = start * OFFR_UNIT
+                # sector base in 8KB banks (what the launcher's SECREL uses)
+                g.save_sector_bank = (start + data_units) * 4
+                placed.append(g)
+                placed_here = True
+                break
+            start += 2
+        if not placed_here:
+            if skip_overflow:
+                dropped.append(g)
+            else:
+                raise RuntimeError(f"Out of flash placing SRAM game {g.title!r}")
 
     # Second pass: non-SCC games (K4/plain) in any free OFFR slot.
     # Sort by size descending so big K4 games (512K Shalom!) get placed first.
@@ -549,6 +617,30 @@ def build_image(launcher: bytes, games, *, skip_overflow=False) -> tuple[bytes, 
             mirror_bank_idx = g.offr * 4 + 63
             mirror_offset = mirror_bank_idx * BANK_SIZE
             image[mirror_offset:mirror_offset + BANK_SIZE] = last_bank
+
+    # SRAM emulation plumbing: YSRT lookup table (bank 14) + META header in
+    # each game's save sector. The table is indexed by DIRECTORY position
+    # (the launcher looks the game up by its menu index).
+    if any(g.sram_type is not None for g in dir_games):
+        table = bytearray(b"YSRT" + bytes([1]) + b"\xFF" * 3)
+        for g in dir_games:
+            if g.sram_type is not None:
+                table += struct.pack("<HBBB", g.save_sector_bank,
+                                     g.sram_type, g.sram_enbit,
+                                     g.sram_slot_banks) + b"\xFF" * 3
+            else:
+                table += b"\xFF" * 8
+        if len(table) > BANK_SIZE:
+            raise RuntimeError("SRAM table overflows bank 14")
+        image[SRAM_TABLE_OFFSET:SRAM_TABLE_OFFSET + len(table)] = table
+        for g in dir_games:
+            if g.sram_type is None:
+                continue
+            # META = bank 7 of the sector: "YSAV", ver, type, slot_banks.
+            # Commit log (+0x10) stays erased (0xFF) = no saves yet.
+            meta_off = (g.save_sector_bank + 7) * BANK_SIZE
+            hdr = b"YSAV" + bytes([1, g.sram_type, g.sram_slot_banks])
+            image[meta_off:meta_off + len(hdr)] = hdr
     return bytes(image), dropped
 
 
