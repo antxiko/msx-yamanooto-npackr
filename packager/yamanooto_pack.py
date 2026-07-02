@@ -55,6 +55,7 @@ FLAG_PSGMUTE    = 0x04
 FLAG_ASCII16    = 0x08
 FLAG_SCC_HELPER = 0x10
 FLAG_SRAM       = 0x20             # SRAM-emulation game (launcher installs helper)
+FLAG_COLDBOOT   = 0x40             # launch via BIOS reboot (resident carts, e.g. GM2)
 
 # SRAM emulation: per-game 64KB save sector + lookup table in flash bank 14.
 # Table format ("YSRT"): +0 magic, +4 ver, +8 entries of 8 bytes indexed by
@@ -447,7 +448,10 @@ class Game:
             # high RAM, so everything lives in its own patched ROM instead.
             # sram_type is kept so the packer reserves the save sector.
             self.banks = (0, 1, 2, 3)
-            self.flags = FLAG_K4
+            # FLAG_COLDBOOT: GM2 is a resident cart; boot it via BIOS reboot so
+            # its INIT gets the standard slot context (a direct CALL INIT leaves
+            # pages mapped to the wrong slot and hangs).
+            self.flags = FLAG_K4 | FLAG_COLDBOOT
             self.sram_type = SRAM_TYPE_GM2
             self.sram_enbit = 0x10
             self.sram_slot_banks = 1

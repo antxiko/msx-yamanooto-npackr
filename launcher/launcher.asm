@@ -107,6 +107,9 @@ FLAG_ASCII16 equ 0x08       ; install ASCII16->K5 helper at 0xF000 before launch
 FLAG_SCC_HELPER equ 0x10    ; install SCC enable helper at 0xF020 (avoids 4x mirror)
 FLAG_SRAM   equ 0x20        ; SRAM-emulation game: install sram helper at 0xF070,
                             ; save area = 64KB flash sector (see SRAM table, bank 14)
+FLAG_COLDBOOT equ 0x40      ; launch via BIOS reboot (jp 0), NOT a direct CALL INIT.
+                            ; For resident carts (Game Master 2) whose INIT needs
+                            ; the standard BIOS slot context (EXPTBL/SLTTBL, RAM slot).
 ; bits 5-7 reserved
 
 ASCII16_HELPER_DST equ 0xF000   ; RAM destination for the ASCII16 helper
@@ -886,6 +889,13 @@ tramp_no_scc_helper:
     ;     BIOS reboots, finds the game's AB header (OFFR persists across
     ;     warm boot), and does its standard cart init flow, triggering any
     ;     hooks the game installed.
+    ; Resident carts (FLAG_COLDBOOT) must be booted by the BIOS itself so their
+    ; INIT runs with the standard slot context — a direct CALL INIT corrupts
+    ; their slot setup (e.g. Game Master 2 leaves pages in the wrong slot).
+    ld   a, (entry_cache + DIR_FLAGS)
+    and  FLAG_COLDBOOT
+    jr   nz, tramp_warmboot
+
     ld   a, (0x4000)
     cp   'A'
     jr   nz, tramp_warmboot
