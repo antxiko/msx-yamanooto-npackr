@@ -82,6 +82,9 @@ MAPPER_ASCII8_SRAM = 'ascii8_sram' # ASCII8+SRAM patched by ascii8sram_to_k5.py 
                                     # and a 64KB flash save sector is reserved.
 MAPPER_GM2         = 'gm2'         # Game Master 2 patched by gm2_to_yamanooto.py —
                                     # GM2 SRAM helper variant + 64KB save sector.
+MAPPER_MG2         = 'mg2'         # Metal Gear 2 patched by mg2_to_yamanooto.py —
+                                    # KonamiSCC + appended micro save-driver +
+                                    # three 64KB save sectors (SNAK1/2/3).
 
 # -----------------------------------------------------------------------------
 # Mapper auto-detection via openMSX softwaredb (SHA1 -> mapper type)
@@ -389,6 +392,9 @@ class Game:
         self.sram_enbit = 0                   # bank-value bit that selects SRAM
         self.sram_slot_banks = 1              # 8KB banks per save slot
         self.save_sector_bank = None          # filled by packer (8KB bank units)
+        # Override the reserved flash footprint (in OFFR/32KB units). Used by
+        # mappers that append driver + save sectors beyond the ROM data (mg2).
+        self.footprint_units = None
 
         size = len(data)
         if mapper == MAPPER_SCC:
@@ -439,6 +445,14 @@ class Game:
                 bit <<= 1
             self.sram_enbit = max(bit, 0x10)
             self.sram_slot_banks = 1
+        elif mapper == MAPPER_MG2:
+            # Metal Gear 2, patched by mg2_to_yamanooto.py (ROM 520KB = 512KB +
+            # 8KB driver at relative bank 0x40). Runs as native KonamiSCC. Its
+            # own save driver writes to three 64KB sectors at relative banks
+            # 0x48/0x50/0x58, so we reserve a 768KB (24-unit) footprint and
+            # place it 16-OFFR-aligned like any SCC game (no wrap mirror: >512K).
+            self.banks = (0, 1, 2, 3)
+            self.footprint_units = 24
         elif mapper == MAPPER_GM2:
             # Game Master 2, bespoke-patched by gm2_to_yamanooto.py. Runs in
             # NATIVE K4 mode (GM2's bank regs are Konami4's) with its SRAM-disk
@@ -496,10 +510,10 @@ def pack_games(games, *, skip_overflow=False):
             occupied[i] = True
 
     # Partition games
-    scc_games  = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5)]
+    scc_games  = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2)]
     sram_games = [g for g in games if g.sram_type is not None]
     non_scc    = [g for g in games
-                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5)
+                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2)
                   and g.sram_type is None]
 
     # Sort SCC games by size descending (place biggest first to avoid fragmentation).
@@ -507,7 +521,9 @@ def pack_games(games, *, skip_overflow=False):
 
     # First pass: SCC games at 16-OFFR-aligned slots.
     for g in scc_games:
-        size_offr = (len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT
+        # footprint_units overrides the data size for mappers that reserve extra
+        # flash after the ROM (mg2: driver + save sectors).
+        size_offr = g.footprint_units or ((len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT)
         # We also reserve 1 OFFR unit for the wrap mirror (at offset 15 from slot start).
         # Game must fit in OFFR 0..(15 - mirror_units) = 0..14 inside the slot.
         if g.needs_wrap_mirror and size_offr > 15:
@@ -516,10 +532,11 @@ def pack_games(games, *, skip_overflow=False):
                 dropped.append(g); continue
             raise RuntimeError(f"{g.title!r}: {len(g.data)}B too big for SCC slot with wrap mirror")
 
-        # Find a free 16-aligned slot
+        # Find a free 16-aligned slot big enough for the whole footprint.
+        span = max(16, size_offr)
         start = _align_up(GAMES_POOL_START // OFFR_UNIT, SCC_OFFR_ALIGN)
         placed_here = False
-        while start + 16 <= n_slots:
+        while start + span <= n_slots:
             # Check the OFFR units we actually need: [start..start+size_offr-1]
             # plus the mirror unit at start+15 (if needs_wrap_mirror).
             need_units = list(range(start, start + size_offr))

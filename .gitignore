@@ -36,3 +36,6 @@ test_*.toml
 
 # Allow the pre-built launcher (it's our own code, not a ROM)
 !launcher/launcher.bin
+
+# build intermediates
+testroms/*.raw
