@@ -448,11 +448,13 @@ class Game:
         elif mapper == MAPPER_MG2:
             # Metal Gear 2, patched by mg2_to_yamanooto.py (ROM 520KB = 512KB +
             # 8KB driver at relative bank 0x40). Runs as native KonamiSCC. Its
-            # own save driver writes to three 64KB sectors at relative banks
-            # 0x48/0x50/0x58, so we reserve a 768KB (24-unit) footprint and
-            # place it 16-OFFR-aligned like any SCC game (no wrap mirror: >512K).
+            # save driver appends SNAK1/2/3 into ONE 64KB sector at relative bank
+            # 0x48 (banks 0x48-0x4F, left 0xFF here), so we reserve a 640KB
+            # (20-unit) footprint and place it 16-OFFR-aligned like any SCC game
+            # (no wrap mirror). The 16-alignment keeps that sector 64KB-aligned
+            # in absolute flash. (Was 3x64KB=768KB before the append rewrite.)
             self.banks = (0, 1, 2, 3)
-            self.footprint_units = 24
+            self.footprint_units = 20
         elif mapper == MAPPER_GM2:
             # Game Master 2, bespoke-patched by gm2_to_yamanooto.py. Runs in
             # NATIVE K4 mode (GM2's bank regs are Konami4's) with its SRAM-disk
