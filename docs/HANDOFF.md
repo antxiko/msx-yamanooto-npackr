@@ -91,6 +91,27 @@ makes a release.
 
 ## What's next (pending)
 
+- **★ NEXT UP — reclaim flash from small games via CFGR SUBOFF (packer-only, no asm).**
+  Today the packer places every game at **32KB OFFR-unit** granularity, so a **16KB game
+  wastes 16KB** (it fills a whole 32KB unit) and there are **many** 16KB Konami titles → a
+  lot of flash lost. Fix: pack small K4/plain games at **8KB** granularity using the CFGR
+  SUBOFF field (2 bits, bits 4-5 = 0/8/16/24KB offset within a 32KB unit) so one 32KB unit
+  holds **2×16KB or 4×8KB** games.
+  - **VERIFIED the launch side is already wired end-to-end** (nothing to do in asm): the
+    trampoline computes CFGR with SUBOFF from `DIR_SUBOFF` (`launcher.asm:776-779`) and
+    applies it at launch (`launcher.asm:872-873`); openMSX resolves banks as
+    `(value + OFFR*4 + suboff) & 0x3FF`. The ONLY gap is the packer never assigns
+    `g.suboff` (always 0 today — `yamanooto_pack.py:383`, written to the dir entry at `:629`).
+  - **The change (Python only):** in `pack_games`, sub-place small K4/plain games inside a
+    32KB unit — assign `g.suboff` (bits 4-5) and put their data at the suboff-shifted flash
+    offset (`flash_offset = (offr*4 + suboff_banks) * BANK_SIZE`). A 16KB game uses only
+    banks 0-1, so at suboff=2 it maps to banks 2-3 and never collides with a suboff=0
+    neighbour — safe. Keep a per-32KB-unit sub-bitmap of free 8KB slots.
+  - **Out of scope / caveats:** SCC games are EXCLUDED (they need 16-OFFR alignment + the
+    wrap-mirror + the 0x3F trick). Only apply to games whose bank usage fits below the
+    suboff boundary (≤16KB → 2 banks, ≤8KB → 1 bank). Verify a couple of packed small games
+    boot + run correctly in openMSX afterwards. Savings ≈ (# of 16KB games) × 16KB.
+
 - **Optional**: full MG2 test — save 3 distinct states to SNAK1/2/3 and confirm each loads
   its own (no cross-contamination). SNAK1 round-trip is already verified.
 - **Fase C — generalize the per-game 64KB RMW model to the other SRAM games**: migrate GM2
