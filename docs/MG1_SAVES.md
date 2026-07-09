@@ -121,3 +121,10 @@ empty. **3 slots** (staging 2334B fits D800 comfortably; symmetric with MG2's mo
 4. Exact stub addresses inside 0x1FFA7-0x1FFFF (fix when writing mg1_driver.asm).
 5. The game ignores carry from TAPOOF (saveload.asm:141) — commit failures must be
    signalled via TAPOON/TAPOUT or swallowed (VERIFY catches them from real flash).
+6. **The dump currently in the user's KONAMIS/ folder does NOT match the disasm
+   target**: `Metal Gear - Konami (1987) [English] [RC-750] [6873].rom` has CRC32
+   `5F3BB2F1`, not `E85C5731` (likely a fan-translation of the JP ROM rather than
+   the European English release). Before implementing: either source the exact
+   `E85C5731` dump or verify all 20 intercept offsets against this one (the
+   patcher must validate the original `CD xx 00` bytes at each offset regardless
+   — refuse loudly on mismatch, never patch blind).
