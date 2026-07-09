@@ -372,6 +372,12 @@ SCC_MIRROR_TARGET = 512 * 1024   # 64 banks. Validated working for Salamander 12
 #   "none"   — neither patch nor mirror; SCC music may not work but game runs.
 _scc_strategy = "auto"
 
+# SCC placement alignment. True (default) = 512KB-aligned slots, required for
+# SCC music in openMSX 21.0 (its SCC-enable check uses the OFFR-adjusted bank;
+# fixed in master, no release yet). False = sequential packing: correct on
+# real hardware / openMSX master builds, silent SCC in openMSX 21.0.
+_scc_align = True
+
 
 class Game:
     """One game to be placed in the flash."""
@@ -576,43 +582,67 @@ def pack_games(games, *, skip_overflow=False):
     # Sort SCC games by size descending (place biggest first to avoid fragmentation).
     scc_games.sort(key=lambda g: -len(g.data))
 
-    # First pass: SCC games at 16-OFFR-aligned slots.
+    # Shared 8KB-granular bookkeeping (offr -> [bool]*4). Created BEFORE the
+    # SCC pass so mirror units can donate their free banks to sub-placed small
+    # games (the mirror itself only uses bank 3 of its unit; the other 24KB
+    # used to be wasted).
+    subunits = {}
+
+    # First pass: SCC games. 16-OFFR-aligned by default (openMSX 21.0 checks
+    # the SCC enable bit on the OFFR-adjusted bank value — fixed in master but
+    # unreleased; real hardware checks the raw value). With scc_align off the
+    # games pack sequentially: correct on real hardware / openMSX master, but
+    # SCC music stays silent in openMSX 21.0.
     for g in scc_games:
         # footprint_units overrides the data size for mappers that reserve extra
         # flash after the ROM (mg2: driver + save sectors).
         size_offr = g.footprint_units or ((len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT)
-        # We also reserve 1 OFFR unit for the wrap mirror (at offset 15 from slot start).
-        # Game must fit in OFFR 0..(15 - mirror_units) = 0..14 inside the slot.
+        # The wrap mirror lives at bank OFFR*4+63, i.e. bank 3 of unit start+15.
+        # Game must fit below it: OFFR units 0..14 of its span.
         if g.needs_wrap_mirror and size_offr > 15:
             # 512K-1 game doesn't fit; would clobber the mirror slot.
             if skip_overflow:
                 dropped.append(g); continue
             raise RuntimeError(f"{g.title!r}: {len(g.data)}B too big for SCC slot with wrap mirror")
 
-        # Find a free 16-aligned slot big enough for the whole footprint.
-        span = max(16, size_offr)
-        start = _align_up(GAMES_POOL_START // OFFR_UNIT, SCC_OFFR_ALIGN)
+        if _scc_align:
+            start = _align_up(GAMES_POOL_START // OFFR_UNIT, SCC_OFFR_ALIGN)
+            step = SCC_OFFR_ALIGN
+        else:
+            start = GAMES_POOL_START // OFFR_UNIT
+            step = 1
+        # How far the placement reaches: up to the mirror unit when there is
+        # one; aligned mode keeps its historical 16-unit minimum stride.
+        extent = max(size_offr, 16) if (g.needs_wrap_mirror or _scc_align) else size_offr
         placed_here = False
-        while start + span <= n_slots:
-            # Check the OFFR units we actually need: [start..start+size_offr-1]
-            # plus the mirror unit at start+15 (if needs_wrap_mirror).
-            need_units = list(range(start, start + size_offr))
+        while start + extent <= n_slots:
+            # Data units must be fully free; the mirror unit only needs its
+            # bank 3 free (it may already host other mirrors / small games).
+            data_free = all(not occupied[i] for i in range(start, start + size_offr))
+            mirror_ok = True
             if g.needs_wrap_mirror:
-                need_units.append(start + 15)
-            if all(not occupied[i] for i in need_units):
-                for i in need_units:
+                m = start + 15
+                mirror_ok = (not occupied[m]) or (m in subunits and not subunits[m][3])
+            if data_free and mirror_ok:
+                for i in range(start, start + size_offr):
                     occupied[i] = True
+                if g.needs_wrap_mirror:
+                    m = start + 15
+                    if m not in subunits:
+                        occupied[m] = True
+                        subunits[m] = [False, False, False, False]
+                    subunits[m][3] = True      # bank 3 = this game's wrap mirror
                 g.offr = start
                 g.flash_offset = start * OFFR_UNIT
                 placed.append(g)
                 placed_here = True
                 break
-            start += SCC_OFFR_ALIGN
+            start += step
         if not placed_here:
             if skip_overflow:
                 dropped.append(g)
             else:
-                raise RuntimeError(f"No 16-aligned slot free for {g.title!r}")
+                raise RuntimeError(f"No flash slot free for SCC game {g.title!r}")
 
     # Pass 1b: SRAM games. Data footprint rounded up to 64KB (2 OFFR units)
     # so the 64KB save sector right after it is sector-aligned in flash.
@@ -650,9 +680,9 @@ def pack_games(games, *, skip_overflow=False):
     # Sort by size descending so big K4 games (512K Shalom!) get placed first.
     # Small games (<=16KB) are sub-placed at 8KB granularity inside a shared
     # 32KB unit via CFGR SUBOFF: one unit holds 2x16KB or 4x8KB games.
-    # subunits tracks the free 8KB slots of every opened shared unit.
+    # subunits (hoisted above) already contains the SCC mirror units, whose
+    # free banks 0-2 get filled here too.
     non_scc.sort(key=lambda g: -len(g.data))
-    subunits = {}   # offr -> [bool]*4, True = 8KB slot used
     for g in non_scc:
         sub_n = _sub_slots_needed(g)
         if sub_n is not None:
@@ -806,11 +836,17 @@ def cmd_build(args):
         import tomli as tomllib  # type: ignore
 
     _apply_flash_size(args.flash_size)
-    global _scc_strategy
+    global _scc_strategy, _scc_align
     _scc_strategy = args.scc_strategy
 
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
+
+    # SCC alignment: CLI --no-scc-align overrides TOML [launcher].scc_align.
+    if args.no_scc_align:
+        _scc_align = False
+    elif cfg.get("launcher", {}).get("scc_align") is not None:
+        _scc_align = bool(cfg["launcher"]["scc_align"])
 
     launcher_path = Path(cfg["launcher"]["file"])
     launcher_data = launcher_path.read_bytes()
@@ -901,13 +937,15 @@ def cmd_test(args):
     image, dropped = build_image(launcher_data, games)
     assert not dropped, f"dropped in self-test: {[g.title for g in dropped]}"
 
-    # --- SUBOFF self-test (hand-computed; pool starts at OFFR 4) ------------
-    # SCC dummy -> 16-aligned slot 16; K4 32KB dummy -> first free OFFR 4.
-    # 16K A opens shared unit 5 (suboff 0), 16K B fills its upper half
-    # (suboff 0x20), 16K C opens unit 6, 8K D takes unit 6 slot 2 (0x20).
+    # --- SUBOFF + mirror-unit self-test (hand-computed; pool starts at 4) ---
+    # SCC dummy -> 16-aligned slot 16, its wrap mirror = bank 3 of unit 31
+    # (seeded [F,F,F,T]: banks 0-2 are donated to small games). K4 32KB dummy
+    # -> first free OFFR 4. Sub-placement scans sorted(subunits) first, so:
+    # 16K A -> unit 31 slot 0; 16K B (slot 2 blocked by the mirror) opens
+    # unit 5; 16K C -> unit 5 slot 2; 8K D -> unit 31 slot 2.
     expected = {
-        "TEST 16K A": (5, 0x00), "TEST 16K B": (5, 0x20),
-        "TEST 16K C": (6, 0x00), "TEST 8K D":  (6, 0x20),
+        "TEST 16K A": (31, 0x00), "TEST 16K B": (5, 0x00),
+        "TEST 16K C": (5, 0x20),  "TEST 8K D":  (31, 0x20),
     }
     for g in (g16a, g16b, g16c, g8d):
         want = expected[g.title]
@@ -920,7 +958,13 @@ def cmd_test(args):
         assert image[base:base + 2] == b"AB", f"{g.title}: no AB at 0x{base:06X}"
     # 16KB sub-placed PLAIN keeps mirrored banks (never maps the neighbour).
     assert g16a.banks == (0, 1, 0, 1) and g8d.banks == (0, 0, 0, 0)
-    print("SUBOFF self-test: 4/4 placements OK")
+    # The SCC wrap mirror (bank 16*4+63 = 127) must be intact even though
+    # A and D now live in banks 124-125 and 126 of the same unit.
+    scc = next(g for g in games if g.mapper == MAPPER_SCC)
+    assert scc.offr == 16, scc.offr
+    mirror = image[127 * BANK_SIZE:(127 + 1) * BANK_SIZE]
+    assert bytes(mirror) == scc.data[-BANK_SIZE:], "wrap mirror clobbered"
+    print("SUBOFF + mirror-unit self-test: 4/4 placements + mirror OK")
 
     out = here / "test_image.rom"
     out.write_bytes(image)
@@ -1050,8 +1094,10 @@ def cmd_pack_folder(args):
     ROM and its `_k5.rom` converted counterpart exist, only the converted one
     is included."""
     _apply_flash_size(args.flash_size)
-    global _scc_strategy
+    global _scc_strategy, _scc_align
     _scc_strategy = args.scc_strategy
+    if args.no_scc_align:
+        _scc_align = False
     folder = Path(args.folder)
     launcher_path = Path(args.launcher) if args.launcher else (
         Path(__file__).resolve().parent.parent / "launcher" / "launcher.bin")
@@ -1187,6 +1233,12 @@ def main():
     pb.add_argument("--no-boot-music", action="store_true",
                     help="Silence the boot jingle (also [launcher].boot_music = false "
                          "in the TOML). Default: jingle plays.")
+    pb.add_argument("--no-scc-align", action="store_true",
+                    help="Pack SCC games sequentially instead of 512KB-aligned. "
+                         "Correct on real hardware (and openMSX master), but SCC "
+                         "music stays SILENT in openMSX 21.0 (its SCC-enable check "
+                         "is fixed only after that release). Also "
+                         "[launcher].scc_align = false in the TOML.")
     pb.set_defaults(func=cmd_build)
 
     pt = sub.add_parser("test", help="Build minimal test image with dummy entries")
@@ -1227,6 +1279,9 @@ def main():
                     help="Title-box colour (1-15 or name).")
     pf.add_argument("--no-boot-music", action="store_true",
                     help="Silence the boot jingle. Default: jingle plays.")
+    pf.add_argument("--no-scc-align", action="store_true",
+                    help="Pack SCC games sequentially (real hardware / openMSX "
+                         "master only — SCC music silent in openMSX 21.0).")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()

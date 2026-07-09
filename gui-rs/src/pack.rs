@@ -62,6 +62,9 @@ pub struct Game {
     pub banks: [u8; 4],
     pub needs_wrap_mirror: bool,
     pub size_blocks_32k: u8,
+    /// Reserved flash beyond the ROM data, in 32KB OFFR units (mg1: 8 = game
+    /// + driver + one 64KB save sector; mg2: 20). Mirrors the Python packer.
+    pub footprint_units: Option<usize>,
     // Filled by pack_games:
     pub offr: u8,
     pub suboff: u8,      // CFGR bits 4-5: 8KB offset inside the 32KB OFFR unit
@@ -95,6 +98,15 @@ impl Game {
                 let needs_mirror = size < SCC_MIRROR_TARGET;
                 (FLAG_ASCII16, [0,1,2,3], needs_mirror, data)
             }
+            // Patched Metal Gears carry their own flash-save driver + one
+            // 64KB sector inside a fixed footprint (see the Python packer).
+            MapperKind::Mg1 => (FLAG_K4, [0,1,2,3], false, data),
+            MapperKind::Mg2 => (0, [0,1,2,3], false, data),
+        };
+        let footprint_units = match mapper {
+            MapperKind::Mg1 => Some(8),   // 128KB game + 8KB driver + pad + 64KB sector
+            MapperKind::Mg2 => Some(20),  // 512KB game + 8KB driver + pad + 64KB sector
+            _ => None,
         };
         if needs_wrap_mirror { /* hint already set in struct field */ flags |= 0; }
         let mut title = title;
@@ -102,6 +114,7 @@ impl Game {
         let size_blocks_32k = (((data.len() + OFFR_UNIT - 1) / OFFR_UNIT).min(255)) as u8;
         Ok(Self {
             title, data, mapper, flags, banks, needs_wrap_mirror, size_blocks_32k,
+            footprint_units,
             offr: 0, suboff: 0, flash_offset: 0,
         })
     }
@@ -128,7 +141,8 @@ fn sub_slots_needed(g: &Game) -> Option<usize> {
     else { None }
 }
 
-pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize) -> Result<Vec<Game>, String> {
+pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize, scc_align: bool)
+    -> Result<Vec<Game>, String> {
     let n_slots = flash.max_offr();
     let mut occupied = vec![false; n_slots];
     // Reserve everything below GAMES_POOL_START.
@@ -139,45 +153,96 @@ pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize) -> Result<Vec<Game>, 
     let mut placed: Vec<Game> = Vec::new();
     let mut dropped: Vec<Game> = Vec::new();
 
-    let (mut scc, mut non_scc): (Vec<Game>, Vec<Game>) = games.drain(..)
-        .partition(|g| matches!(g.mapper, MapperKind::Scc | MapperKind::Ascii16K5));
+    let (mut scc, rest): (Vec<Game>, Vec<Game>) = games.drain(..)
+        .partition(|g| matches!(g.mapper,
+            MapperKind::Scc | MapperKind::Ascii16K5 | MapperKind::Mg2));
+    let (mut mg1, mut non_scc): (Vec<Game>, Vec<Game>) = rest.into_iter()
+        .partition(|g| matches!(g.mapper, MapperKind::Mg1));
 
     scc.sort_by(|a, b| b.data.len().cmp(&a.data.len()));
+    mg1.sort_by(|a, b| b.data.len().cmp(&a.data.len()));
     non_scc.sort_by(|a, b| b.data.len().cmp(&a.data.len()));
 
-    // SCC: 16-aligned slots
+    // Shared 8KB-granular bookkeeping (unit -> [bool;4]). Created BEFORE the
+    // SCC pass so mirror units donate their free banks 0-2 to sub-placed
+    // small games (the wrap mirror itself only needs bank 3 of its unit).
+    let mut subunits: BTreeMap<usize, [bool; 4]> = BTreeMap::new();
+
+    // SCC pass. 16-aligned by default (openMSX 21.0 checks the SCC enable on
+    // the OFFR-adjusted bank; fixed in master, unreleased). scc_align=false
+    // packs sequentially: correct on real hardware / openMSX master, silent
+    // SCC music in openMSX 21.0. mg2's footprint reserves driver + sector.
     for g in scc {
-        let size_offr = g.size_offr();
+        let size_offr = g.footprint_units.unwrap_or_else(|| g.size_offr());
         if g.needs_wrap_mirror && size_offr > 15 {
             dropped.push(g);
             continue;
         }
+        let needs_mirror = g.needs_wrap_mirror;
+        let (mut start, step) = if scc_align {
+            (align_up(GAMES_POOL_START / OFFR_UNIT, SCC_OFFR_ALIGN as usize),
+             SCC_OFFR_ALIGN as usize)
+        } else {
+            (GAMES_POOL_START / OFFR_UNIT, 1)
+        };
+        let extent = if needs_mirror || scc_align { size_offr.max(16) } else { size_offr };
         let mut slot: Option<Game> = Some(g);
-        let mut start = align_up(GAMES_POOL_START / OFFR_UNIT, SCC_OFFR_ALIGN as usize);
-        while start + 16 <= n_slots {
-            let needs_mirror = slot.as_ref().unwrap().needs_wrap_mirror;
-            let mut needed: Vec<usize> = (start..start + size_offr).collect();
-            if needs_mirror { needed.push(start + 15); }
-            if needed.iter().all(|&i| !occupied[i]) {
-                for &i in &needed { occupied[i] = true; }
+        while start + extent <= n_slots {
+            // Data units must be fully free; the mirror unit only needs its
+            // bank 3 free (it may already host other mirrors / small games).
+            let data_free = (start..start + size_offr).all(|i| !occupied[i]);
+            let mirror_ok = if needs_mirror {
+                let m = start + 15;
+                !occupied[m] || subunits.get(&m).map_or(false, |b| !b[3])
+            } else { true };
+            if data_free && mirror_ok {
+                for i in start..start + size_offr { occupied[i] = true; }
+                if needs_mirror {
+                    let m = start + 15;
+                    if !subunits.contains_key(&m) {
+                        occupied[m] = true;
+                        subunits.insert(m, [false; 4]);
+                    }
+                    subunits.get_mut(&m).unwrap()[3] = true;   // bank 3 = mirror
+                }
                 let mut g = slot.take().unwrap();
                 g.offr = start as u8;
                 g.flash_offset = start * OFFR_UNIT;
                 placed.push(g);
                 break;
             }
-            start += SCC_OFFR_ALIGN as usize;
+            start += step;
         }
         if let Some(g) = slot {
             dropped.push(g);
         }
     }
 
+    // MG1: even-aligned slots so its 64KB save sector (relative bank 0x18)
+    // stays 64KB-aligned in absolute flash. Mirrors the Python SRAM pass.
+    for g in mg1 {
+        let span = g.footprint_units.unwrap_or_else(|| g.size_offr());
+        let mut slot: Option<Game> = Some(g);
+        let mut start = align_up(GAMES_POOL_START / OFFR_UNIT, 2);
+        while start + span <= n_slots {
+            if (start..start + span).all(|i| !occupied[i]) {
+                for i in start..start + span { occupied[i] = true; }
+                let mut g = slot.take().unwrap();
+                g.offr = start as u8;
+                g.flash_offset = start * OFFR_UNIT;
+                placed.push(g);
+                break;
+            }
+            start += 2;
+        }
+        if let Some(g) = slot { dropped.push(g); }
+    }
+
     // Non-SCC: any free slot. Small (<=16KB) K4/plain games are sub-placed at
     // 8KB granularity inside a shared 32KB unit via CFGR SUBOFF: one unit
-    // holds 2x16KB or 4x8KB games. subunits tracks each opened unit's free
-    // 8KB slots; BTreeMap iteration order matches Python's sorted() (parity).
-    let mut subunits: BTreeMap<usize, [bool; 4]> = BTreeMap::new();
+    // holds 2x16KB or 4x8KB games. subunits (hoisted above) already contains
+    // the SCC mirror units, whose free banks 0-2 get filled here too;
+    // BTreeMap iteration order matches Python's sorted() (parity).
     for g in non_scc {
         if let Some(sub_n) = sub_slots_needed(&g) {
             let mut slot: Option<(usize, usize)> = None;
@@ -385,6 +450,7 @@ mod title_tests {
         let colors = MenuColors { text: 7, bg: 4, box_: 11 }; // cyan / dark-blue / light-yellow
         let (image, dropped) = build_image(
             &launcher, &mut games, FlashSize::Mb8,
+            true,                // SCC alignment on (default)
             Some(""), Some("MI TITULO GUI"),
             false,               // splash off
             false,               // boot jingle off (asserted below)
@@ -434,15 +500,17 @@ mod title_tests {
             Game::new("TEST 16K C".into(), dummy(16 * 1024), MapperKind::Plain).unwrap(),
             Game::new("TEST 8K D".into(),  dummy(8 * 1024),  MapperKind::Plain).unwrap(),
         ];
-        let dropped = pack_games(&mut games, FlashSize::Mb8).unwrap();
+        let dropped = pack_games(&mut games, FlashSize::Mb8, true).unwrap();
         assert!(dropped.is_empty());
         let find = |t: &str| games.iter().find(|g| g.title == t).unwrap();
-        // Hand-computed (pool starts at OFFR 4): SCC -> 16-aligned slot 16;
-        // K4 32KB -> OFFR 4; 16K A opens shared unit 5, 16K B fills its upper
-        // half, 16K C opens unit 6, 8K D takes unit 6 slot 2.
+        // Hand-computed (pool starts at OFFR 4): SCC -> 16-aligned slot 16,
+        // its mirror = bank 3 of unit 31 (banks 0-2 donated to small games);
+        // K4 32KB -> OFFR 4; 16K A -> unit 31 slot 0; 16K B (slot 2 blocked
+        // by the mirror) opens unit 5; 16K C -> unit 5 slot 2; 8K D -> unit
+        // 31 slot 2. Twin of `yamanooto_pack.py test`.
         for (title, offr, suboff) in [
-            ("TEST 16K A", 5u8, 0x00u8), ("TEST 16K B", 5, 0x20),
-            ("TEST 16K C", 6, 0x00),     ("TEST 8K D",  6, 0x20),
+            ("TEST 16K A", 31u8, 0x00u8), ("TEST 16K B", 5, 0x00),
+            ("TEST 16K C", 5, 0x20),      ("TEST 8K D",  31, 0x20),
         ] {
             let g = find(title);
             assert_eq!((g.offr, g.suboff), (offr, suboff), "{title}");
@@ -458,9 +526,59 @@ mod title_tests {
         let mut sorted = games.clone();
         sorted.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         let dir = build_directory(&sorted).unwrap();
-        let idx = sorted.iter().position(|g| g.title == "TEST 16K B").unwrap();
+        let idx = sorted.iter().position(|g| g.title == "TEST 8K D").unwrap();
         let entry = &dir[DIR_HDR_SIZE + idx * DIR_ENTRY_SIZE..];
         assert_eq!(entry[25], 0x20, "dir entry SUBOFF byte");
+    }
+
+    // Sequential (scc_align = false): SCC games pack first-fit, mirrors are
+    // seeded as bank 3 of unit start+15, and small games fill those units.
+    // Twin of the Python sanity check (256K at 4, 128K at 12, 16K in unit 19).
+    #[test]
+    fn scc_align_off_packs_sequentially() {
+        fn dummy(size: usize) -> Vec<u8> {
+            let mut rom = vec![0u8; size];
+            rom[0] = b'A'; rom[1] = b'B';
+            rom[2] = 0x10; rom[3] = 0x40;
+            rom
+        }
+        let mut games = vec![
+            Game::new("SCC 128K".into(), dummy(128 * 1024), MapperKind::Scc).unwrap(),
+            Game::new("SCC 256K".into(), dummy(256 * 1024), MapperKind::Scc).unwrap(),
+            Game::new("K4 32K".into(),   dummy(32 * 1024),  MapperKind::K4).unwrap(),
+            Game::new("P 16K".into(),    dummy(16 * 1024),  MapperKind::Plain).unwrap(),
+        ];
+        let dropped = pack_games(&mut games, FlashSize::Mb8, false).unwrap();
+        assert!(dropped.is_empty());
+        let find = |t: &str| games.iter().find(|g| g.title == t).unwrap();
+        assert_eq!(find("SCC 256K").offr, 4, "biggest SCC first-fit at the pool start");
+        assert_eq!(find("SCC 128K").offr, 12, "next SCC packs right after");
+        assert_eq!(find("K4 32K").offr, 16);
+        // the 16K game fills the first mirror unit (256K's mirror = unit 19)
+        assert_eq!((find("P 16K").offr, find("P 16K").suboff), (19, 0x00));
+    }
+
+    #[test]
+    fn mg1_reserves_even_aligned_64k_sector_footprint() {
+        // MG1 output = 128KB game + 8KB driver = 0x22000 bytes.
+        let mut mg1 = vec![0u8; 0x22000];
+        mg1[0] = b'A'; mg1[1] = b'B';
+        let mut games = vec![
+            Game::new("METAL GEAR".into(), mg1, MapperKind::Mg1).unwrap(),
+            Game::new("A 16K".into(), vec![0u8; 16 * 1024], MapperKind::Plain).unwrap(),
+        ];
+        assert_eq!(games[0].footprint_units, Some(8));
+        let dropped = pack_games(&mut games, FlashSize::Mb8, true).unwrap();
+        assert!(dropped.is_empty());
+        let mg1 = games.iter().find(|g| g.title == "METAL GEAR").unwrap();
+        // even OFFR (pool starts at 4) so the sector at relative bank 0x18
+        // (0x30000 = 6 units in) lands 64KB-aligned in absolute flash.
+        assert_eq!(mg1.offr, 4);
+        assert_eq!(mg1.offr % 2, 0);
+        assert_eq!(mg1.flash_offset, 4 * OFFR_UNIT);
+        // the 16KB game must not have been placed inside MG1's 8-unit footprint
+        let other = games.iter().find(|g| g.title == "A 16K").unwrap();
+        assert!(other.offr >= 12, "other game overlaps MG1 footprint: {}", other.offr);
     }
 
     #[test]
@@ -622,6 +740,7 @@ pub fn build_image(
     launcher: &[u8],
     games: &mut Vec<Game>,
     flash: FlashSize,
+    scc_align: bool,
     marquee: Option<&str>,
     title: Option<&str>,
     show_splash: bool,
@@ -644,7 +763,7 @@ pub fn build_image(
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));
     }
 
-    let dropped = pack_games(games, flash)?;
+    let dropped = pack_games(games, flash, scc_align)?;
 
     let mut image = vec![FILL_BYTE; flash.bytes()];
     image[LAUNCHER_OFFSET..LAUNCHER_OFFSET + launcher.len()].copy_from_slice(&launcher);

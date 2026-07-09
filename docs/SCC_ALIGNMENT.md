@@ -47,8 +47,9 @@ Las dos diferencias importantes:
 
 ## 3. El bug de openMSX 21.0
 
-En la versión actual de openMSX (la 21.0, abril 2026), la función que decide
-si el chip SCC está activo mira el banco **después** de aplicar OFFR:
+En la versión actual de openMSX (la 21.0, septiembre 2025 — última release a
+julio 2026), la función que decide si el chip SCC está activo mira el banco
+**después** de aplicar OFFR:
 
 ```cpp
 // openMSX 21.0 — Yamanooto::isSCCAccess()
@@ -102,9 +103,21 @@ Esto **solo es necesario por el bug de openMSX 21**. En hardware Yamanooto
 real:
 
 - El bug NO existe — el SCC se activa siempre que escribas `0x3F`, da igual
-  el OFFR
+  el OFFR (evidencia directa en hardware para el caso SCC+, issue
+  openMSX#1992; para el caso SCC/0x3F es la extrapolación del propio fix,
+  sin test público en hardware — pendiente de un test de 5 min con cartucho)
 - Pero alinear a 512KB **tampoco hace daño**, así que mantenemos el
-  alineamiento por compatibilidad con el emulador hasta que salga openMSX 22
+  alineamiento POR DEFECTO por compatibilidad con el emulador hasta que
+  salga la release de openMSX con el fix (commit `b3ad128`, solo en master)
+
+### El alineamiento es OPCIONAL desde 2026-07
+
+`--no-scc-align` (CLI), `[launcher] scc_align = false` (TOML) o el checkbox
+"SCC 512KB alignment" de la GUI empaquetan los juegos SCC **secuencialmente,
+sin alineamiento**: correcto en hardware real y en openMSX master, pero la
+música SCC queda MUDA en openMSX 21.0. Cuando salga la siguiente release de
+openMSX, el default debería invertirse. El wrap-mirror (abajo) se mantiene
+en ambos modos: es un requisito del hardware, no del emulador.
 
 ## 6. Cómo lo aprovecha el packager
 
@@ -117,6 +130,10 @@ banco extra de 8KB** (no los 512KB enteros):
   música)
 - Los ~376KB del medio **se reutilizan para meter otros juegos** (K4, plain)
   que no necesitan alineamiento
+- Desde 2026-07, además, los **otros 3 bancos (24KB) de la unidad del mirror**
+  también se reutilizan: la unidad se registra en el mapa de sub-colocación
+  (SUBOFF) con solo su banco 3 ocupado, y los juegos de ≤16KB rellenan los
+  bancos 0-2. Con ~14 juegos SCC eso recupera ~336KB que antes se perdían.
 
 Por eso una colección de 14 SCC + 35 plain + 9 K4 = **59 juegos Konami en
 5.3MB** del flash de 8MB.

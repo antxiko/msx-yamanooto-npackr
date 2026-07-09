@@ -32,7 +32,7 @@ const FONT6X8: &[u8] = include_bytes!("../data/font6x8.bin");
 // re-tags (ROM packed as-is, only CFGR/bank setup differs). ascii8/ascii16 run
 // the converter on the raw ROM, so ASCII games whose SHA1 is not in the softdb
 // can still be forced through — same result as the CLI --auto-convert.
-const MAPPER_CHOICES: &[&str] = &["scc", "k5", "k4", "plain", "ascii8", "ascii16"];
+const MAPPER_CHOICES: &[&str] = &["scc", "k5", "k4", "plain", "ascii8", "ascii16", "mg1", "mg2"];
 
 fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
     g.unsupported_reason = None;
@@ -41,6 +41,28 @@ fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
         "k5"    => { g.data = g.raw.clone(); g.mapper = Some(MapperKind::K5); }
         "k4"    => { g.data = g.raw.clone(); g.mapper = Some(MapperKind::K4); }
         "plain" => { g.data = g.raw.clone(); g.mapper = Some(MapperKind::Plain); }
+        // mg1/mg2 patch a raw Metal Gear on the fly (or accept an already-
+        // patched dump); refuse anything else.
+        "mg1"   => {
+            if let Some(p) = convert::mg1_to_yamanooto(&g.raw) {
+                g.data = p; g.mapper = Some(MapperKind::Mg1);
+            } else if mapper::detect_patched_mg(&g.raw) == Some(MapperKind::Mg1) {
+                g.data = g.raw.clone(); g.mapper = Some(MapperKind::Mg1);
+            } else {
+                g.mapper = None;
+                g.unsupported_reason = Some("Not a Metal Gear 1 ROM (need the 128KB RC750 dump)".into());
+            }
+        }
+        "mg2"   => {
+            if let Some(p) = convert::mg2_to_yamanooto(&g.raw) {
+                g.data = p; g.mapper = Some(MapperKind::Mg2);
+            } else if mapper::detect_patched_mg(&g.raw) == Some(MapperKind::Mg2) {
+                g.data = g.raw.clone(); g.mapper = Some(MapperKind::Mg2);
+            } else {
+                g.mapper = None;
+                g.unsupported_reason = Some("Not a Metal Gear 2 ROM (need the 512KB GoodMSX dump)".into());
+            }
+        }
         "ascii8" => {
             let (patched, n) = convert::ascii8_to_k5(&g.raw);
             if n > 0 {
@@ -86,6 +108,7 @@ struct App {
     marquee: String,
     title: String,
     flash_size: FlashSize,
+    scc_align: bool,
     show_splash: bool,
     boot_music: bool,
     tile: [u8; 8],
@@ -102,6 +125,7 @@ impl Default for App {
             marquee: String::new(),
             title: String::new(),
             flash_size: FlashSize::Mb8,
+            scc_align: true,
             show_splash: true,
             boot_music: true,
             tile: [0; 8],
@@ -314,8 +338,22 @@ impl eframe::App for App {
         for p in dropped { self.add_rom(p); }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("MSX Yamanooto nPackR");
-            ui.label("Build a Yamanooto flash image from your own ROMs.");
+            // Header row: title on the left, the big Build ROM button top-right.
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.heading("MSX Yamanooto nPackR");
+                    ui.label("Build a Yamanooto flash image from your own ROMs.");
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
+                    let big = egui::Button::new(
+                        egui::RichText::new("Build ROM").size(22.0).strong())
+                        .min_size(egui::vec2(180.0, 48.0));
+                    if ui.add_enabled(supported > 0, big).clicked() {
+                        self.do_build();
+                    }
+                });
+            });
             ui.separator();
 
             // SETTINGS
@@ -373,6 +411,12 @@ impl eframe::App for App {
 
                 ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
                 ui.checkbox(&mut self.boot_music, "Boot jingle (Konami-style chime)");
+                ui.checkbox(&mut self.scc_align,
+                    "SCC 512KB alignment (openMSX 21 compat)")
+                    .on_hover_text("ON (default): SCC games sit at 512KB boundaries so \
+their music works in openMSX 21.0 (its SCC check is buggy; fixed after that release).\n\
+OFF: fully sequential packing — correct on REAL hardware and openMSX master builds, \
+but SCC music stays silent in openMSX 21.0.");
 
                 // 8x8 background tile editor (baked into the launcher; the
                 // menu scrolls it diagonally in the background). All-off =
@@ -541,13 +585,6 @@ impl eframe::App for App {
                     self.games.len() - supported,
                     total_kb, flash_kb))
                     .small().color(egui::Color32::GRAY));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let enabled = supported > 0;
-                    if ui.add_enabled(enabled, egui::Button::new("Build ROM")).clicked() {
-                        self.do_build();
-                    }
-                });
             });
 
             if !self.status.is_empty() {
@@ -571,6 +608,24 @@ impl App {
             }
         };
         let size = raw.len();
+
+        // Metal Gear 1 / 2: patch the RAW ROM for flash saves on the fly (like
+        // ASCII8/16 conversion), OR accept an already-patched dump. Either way
+        // it enters as the mg1/mg2 mapper so its save footprint is reserved.
+        if let Some(patched) = convert::mg1_to_yamanooto(&raw) {
+            self.push_mg(filename, "MG1 → flash saves", MapperKind::Mg1, patched, raw);
+            return;
+        }
+        if let Some(patched) = convert::mg2_to_yamanooto(&raw) {
+            self.push_mg(filename, "MG2 → flash saves", MapperKind::Mg2, patched, raw);
+            return;
+        }
+        if let Some(m) = mapper::detect_patched_mg(&raw) {
+            let already = raw.clone();
+            self.push_mg(filename, &format!("{} (already patched)", m.short()), m, already, raw);
+            return;
+        }
+
         let sha1 = softdb::sha1_hex(&raw);
         let entry = softdb().lookup(&sha1);
 
@@ -621,6 +676,17 @@ impl App {
         });
     }
 
+    /// Register a Metal Gear entry (data = the flash-ready image; raw kept so
+    /// the mapper dropdown can re-derive it).
+    fn push_mg(&mut self, filename: String, tag: &str, mapper: MapperKind,
+               data: Vec<u8>, raw: Vec<u8>) {
+        let title = strip_known_tags(&filename);
+        self.games.push(GameEntry {
+            filename, title, size: raw.len(), mapper: Some(mapper),
+            softdb_type: tag.to_string(), data, unsupported_reason: None, raw,
+        });
+    }
+
     fn do_build(&mut self) {
         // Convert UI rows into pack::Game
         let mut games = Vec::new();
@@ -638,7 +704,7 @@ impl App {
         // Always apply the marquee field: empty -> blank marquee (not the default).
         let marquee_opt = Some(self.marquee.trim());
         let title_opt = if self.title.trim().is_empty() { None } else { Some(self.title.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.scroll_dir, self.tile_color, self.colors);
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, self.scc_align, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.scroll_dir, self.tile_color, self.colors);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }
