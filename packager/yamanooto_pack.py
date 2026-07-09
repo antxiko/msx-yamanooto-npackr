@@ -1107,7 +1107,10 @@ def cmd_pack_folder(args):
     launcher_data = _apply_colors(launcher_data, args.color_text, args.color_bg, args.color_box)
     launcher_data = _apply_music(launcher_data, False if args.no_boot_music else None)
 
-    rom_paths = sorted(folder.glob("*.rom")) + sorted(folder.glob("*.ROM"))
+    # NOTE: not two globs ("*.rom" + "*.ROM") — Windows matches glob
+    # patterns case-insensitively, so both patterns match every file and
+    # each game would be packed (and placed in flash) TWICE.
+    rom_paths = sorted(p for p in folder.iterdir() if p.suffix.lower() == ".rom")
 
     # If both `foo.rom` (ASCII8) and `foo_k5.rom` exist, drop the original.
     converted_stems = {p.stem[:-3] for p in rom_paths
