@@ -204,9 +204,11 @@ sel_index     equ RAM_BASE + 67   ; 2 bytes: directory index of the launched gam
 msx_version   equ RAM_BASE + 69   ; 1 byte: BIOS 0x002D cached at boot
 opt_hz        equ RAM_BASE + 70   ; 1 byte: 0 = 50Hz, 1 = 60Hz (session toggle, '5' key)
 opt_r800      equ RAM_BASE + 71   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session toggle, '8' key)
-anim_phase    equ RAM_BASE + 72   ; 1 byte: background tile animation phase (0..7)
+anim_vphase   equ RAM_BASE + 72   ; 1 byte: tile animation vertical phase (0..7)
 anim_ticker   equ RAM_BASE + 73   ; 1 byte: frame divider for ANIM_RATE
 tile_buf      equ RAM_BASE + 74   ; 8 bytes: rotated tile scratch for anim_tick
+mdr_ncells    equ RAM_BASE + 82   ; 1 byte: text cells of the list row being drawn
+anim_hphase   equ RAM_BASE + 83   ; 1 byte: tile animation horizontal phase (0..7)
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -265,7 +267,8 @@ init:
     ld   (opt_hz), a
     xor  a
     ld   (opt_r800), a      ; CPU toggle always boots as Z80 (turbo R default)
-    ld   (anim_phase), a
+    ld   (anim_vphase), a
+    ld   (anim_hphase), a
     ld   (anim_ticker), a
 
     ; --- screen setup (SCREEN 2) using the packager-configured colours ---
@@ -512,6 +515,8 @@ menu_rl_loop:
 ; to call twice per cursor move (old + new) so the marquee never stalls.
 menu_draw_row:
     call clear_linebuf
+    ld   hl, 0
+    ld   (rp_x), hl         ; empty rows render nothing -> N = 0 (all tile)
     ld   hl, (menu_top)
     ld   a, (rl_i)
     ld   e, a
@@ -529,15 +534,29 @@ menu_draw_row:
     ld   a, NAME_X
     call render_str_prop  ; -> LINEBUF, leaves rp_x = title end pixel
 mdr_empty:
+    ; N = ceil(rp_x/8) text cells; everything right of the text is handed to
+    ; the shared background tile (mdr_nt), so titles do not "print black"
+    ; past their own width.
+    ld   a, (rp_x)          ; text end pixel (fits in the low byte: max 146)
+    add  a, 7
+    rrca
+    rrca
+    rrca
+    and  0x1F
+    ld   (mdr_ncells), a
     ld   a, (rl_i)
     add  a, LIST_TOP
     ld   b, a
-    call flush_row_pat_n    ; restricted: cells 22..31 belong to the bg tile
+    call mdr_nt             ; NT: text cells native, the rest -> TILE_IDX
+    ld   a, (rl_i)
+    add  a, LIST_TOP
+    ld   b, a
+    call flush_row_text     ; patterns: only the text cells
     ld   a, (rl_i)
     add  a, LIST_TOP
     ld   b, a
     ld   a, (v_col_normal)
-    call set_row_color_n
+    call set_row_color_text ; colour: only the text cells
     ld   a, (rl_i)
     ld   hl, menu_cursor
     cp   (hl)
@@ -2562,28 +2581,86 @@ set_row_color:
     call FILVRM
     ret
 
-; Restricted variants for the LIST rows only: flush/colour cells 0..21
-; (176 px). Cells 22..31 of the list rows are background-tile cells
-; (remapped by bg_remap to the shared pattern TILE_IDX) and must never be
-; overwritten by a row flush. Titles end below 147px, so nothing is lost.
-flush_row_pat_n:
-    ld   h, b
-    ld   l, 0               ; HL = row*256
-    ex   de, hl             ; DE = VRAM dest (PATBASE=0)
+; Variable-width row helpers for the LIST rows: only the cells that actually
+; contain text (mdr_ncells, computed from rp_x by menu_draw_row) get flushed
+; and coloured; every cell right of the text is handed to the shared
+; background tile by mdr_nt. This is what lets the tile fill the whole
+; background instead of titles "printing black" past their own width.
+
+; flush_row_text — LINEBUF -> pattern row, mdr_ncells*8 bytes. In: B = row.
+flush_row_text:
+    ld   d, b               ; D = row
+    ld   a, (mdr_ncells)
+    or   a
+    ret  z
+    ld   l, a
+    ld   h, 0
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl             ; HL = N*8 (max 248)
+    ld   c, l
+    ld   b, 0               ; BC = byte count
+    ld   e, 0               ; DE = row*256 (VRAM dest, PATBASE=0)
     ld   hl, LINEBUF
-    ld   bc, 176
     call LDIRVM
     ret
 
-set_row_color_n:
-    push af
-    ld   h, b
+; set_row_color_text — colour the text cells only. In: B = row, A = colour.
+set_row_color_text:
+    ld   d, b               ; D = row
+    ld   e, a               ; E = colour
+    ld   a, (mdr_ncells)
+    or   a
+    ret  z
+    ld   l, a
+    ld   h, 0
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    ld   c, l
+    ld   b, 0               ; BC = N*8
+    ld   h, d
     ld   l, 0
+    push de
     ld   de, COLBASE
-    add  hl, de
-    ld   bc, 176
-    pop  af
+    add  hl, de             ; HL = COLBASE + row*256
+    pop  de
+    ld   a, e
     call FILVRM
+    ret
+
+; mdr_nt — repoint this row's NT entries: text cells (0..N-1) keep their
+; native index (scr2_init's bitmap fill: value = (row*32+col) & 0xFF), the
+; rest point at the shared background tile. In: B = row.
+mdr_nt:
+    ld   a, (mdr_ncells)
+    ld   c, a               ; C = N
+    ld   l, b
+    ld   h, 0
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl
+    add  hl, hl             ; HL = row*32
+    push hl
+    ld   de, NAMBASE
+    add  hl, de             ; HL = NT address of (row, 0)
+    pop  de                 ; E = (row*32) & 0xFF = native value of col 0
+    ld   b, 32
+mnt_col:
+    ld   a, c
+    or   a
+    jr   z, mnt_tile
+    dec  c
+    ld   a, e               ; native index (text cell)
+    jr   mnt_write
+mnt_tile:
+    ld   a, TILE_IDX        ; background tile cell
+mnt_write:
+    call WRTVRM
+    inc  hl
+    inc  e                  ; native value advances (8-bit wrap = per third)
+    djnz mnt_col
     ret
 
 ;------------------------------------------------------------------------------
@@ -2865,41 +2942,33 @@ colour_box_red:
 bg_remap:
     ld   d, 0               ; row 0: cells outside the box
     call bgr_toprow
-    ld   d, 2               ; row 2: idem
-    call bgr_toprow
-    ld   d, 3               ; right strip: rows 3..21
-bgr_strip:
-    ld   a, d
-    cp   22
-    jr   nc, bgr_marq
-    push de
-    ld   l, d
-    ld   h, 0
-    add  hl, hl
-    add  hl, hl
-    add  hl, hl
-    add  hl, hl
-    add  hl, hl             ; HL = row*32
-    ld   de, NAMBASE + 22
-    add  hl, de
-    ld   e, 10              ; cols 22..31
-bgr_scol:
-    ld   a, TILE_IDX
-    call WRTVRM
-    inc  hl
-    dec  e
-    jr   nz, bgr_scol
-    pop  de
-    inc  d
-    jr   bgr_strip
-bgr_marq:
+    ld   d, 2               ; row 2: idem (row 1 stays background — looks
+    call bgr_toprow         ;  better with breathing room around the box)
+    ; (list rows 3..21 are remapped per-row by mdr_nt on every redraw)
     ld   hl, NAMBASE + 23*32 + 30
     ld   a, TILE_IDX
     call WRTVRM
     inc  hl
     ld   a, TILE_IDX
     call WRTVRM
-    ; colour the three shared tiles (one 8-byte fill per third)
+    ; colour the three shared tiles (one 8-byte fill per third): explicit
+    ; cfg_tile_color (<<4 over the menu bg nibble), or the box colour when 0
+    ld   a, (cfg_tile_color)
+    and  0x0F
+    jr   z, bgr_autocol
+    rlca
+    rlca
+    rlca
+    rlca                    ; colour nibble -> high half
+    ld   d, a
+    ld   a, (cfg_col_bg)
+    and  0x0F
+    or   d
+    jr   bgr_havecol
+bgr_autocol:
+    ld   a, (v_col_box)
+bgr_havecol:
+    ld   d, a               ; D = colour byte for the three fills
     ld   hl, TILE_COL0
     call bgr_col8
     ld   hl, TILE_COL1
@@ -2907,7 +2976,7 @@ bgr_marq:
     ld   hl, TILE_COL2
     ; fall through: bgr_col8's tail RET returns to bg_remap's caller
 bgr_col8:
-    ld   a, (v_col_box)
+    ld   a, d
     ld   bc, 8
     jp   FILVRM
 
@@ -2950,6 +3019,9 @@ bgr_tskip:
 
 ; anim_tick — advance the tile animation every ANIM_RATE frames. Runs right
 ; after the main_loop HALT (vblank), so the three 8-byte writes never tear.
+; Direction comes from cfg_scroll_dir (0..7 compass, baked by the builders):
+; each step adds the direction's (dv, dh) deltas to two independent phases;
+; the drawn tile is cfg_tile shifted dv rows and rotated dh bits per step.
 anim_tick:
     ld   a, (anim_ticker)
     inc  a
@@ -2958,18 +3030,33 @@ anim_tick:
     ret  c
     xor  a
     ld   (anim_ticker), a
-    ld   a, (anim_phase)
-    inc  a
+    ; advance both phases by the direction deltas
+    ld   a, (cfg_scroll_dir)
     and  7
-    ld   (anim_phase), a
-    ld   c, a               ; C = phase
+    add  a, a
+    ld   e, a
+    ld   d, 0
+    ld   hl, anim_dirs
+    add  hl, de             ; HL -> (dv, dh) for this direction
+    ld   a, (anim_vphase)
+    add  a, (hl)
+    and  7
+    ld   (anim_vphase), a
+    inc  hl
+    ld   a, (anim_hphase)
+    add  a, (hl)
+    and  7
+    ld   (anim_hphase), a
+    ; build the shifted+rotated tile into tile_buf
+    ld   a, (anim_hphase)
+    ld   c, a               ; C = horizontal rotation count (constant)
     ld   b, 8               ; B = rows to build
     ld   d, 0               ; D = output row
     ld   ix, tile_buf
 at_row:
-    ld   a, d
-    add  a, c
-    and  7                  ; source row = (row + phase) & 7  (vertical shift)
+    ld   a, (anim_vphase)
+    add  a, d
+    and  7                  ; source row = (row + vphase) & 7
     ld   e, a
     push de
     ld   d, 0
@@ -2977,7 +3064,7 @@ at_row:
     add  hl, de
     ld   a, (hl)
     pop  de
-    push bc                 ; rotate right by phase bits (horizontal shift)
+    push bc                 ; rotate right by hphase bits
     inc  c
 at_rot:
     dec  c
@@ -3003,6 +3090,19 @@ at_rotdone:
     ld   de, TILE_PAT2
     ld   bc, 8
     jp   LDIRVM             ; tail call
+
+; (dv, dh) per compass direction 0..7: N, NE, E, SE, S, SW, W, NW.
+; dv shifts the source row (+1 = content moves up), dh rotates bits
+; (+1 = content moves right); 0xFF = -1 (mod-8 wrap in anim_tick).
+anim_dirs:
+    db 0x01, 0x00           ; 0 N  (up)
+    db 0x01, 0x01           ; 1 NE (up-right, the classic)
+    db 0x00, 0x01           ; 2 E  (right)
+    db 0xFF, 0x01           ; 3 SE (down-right)
+    db 0xFF, 0x00           ; 4 S  (down)
+    db 0xFF, 0xFF           ; 5 SW (down-left)
+    db 0x00, 0xFF           ; 6 W  (left)
+    db 0x01, 0xFF           ; 7 NW (up-left)
 
 ;==============================================================================
 ; BOOT JINGLE — short Konami-style ascending arpeggio on PSG channel A.
@@ -3174,8 +3274,12 @@ cfg_music_enable:
     db 1                   ; +12 0 = skip boot jingle, 1 = play (default)
 cfg_tile:
     db 0, 0, 0, 0, 0, 0, 0, 0 ; +13..20 background tile 8x8 (all-0 = plain bg)
+cfg_scroll_dir:
+    db 1                   ; +21 tile scroll direction 0..7 (N,NE,E,SE,S,SW,W,NW)
+cfg_tile_color:
+    db 0                   ; +22 tile colour nibble 1-15; 0 = use the box colour
 cfg_reserved:
-    db 0, 0, 0             ; +21..23 reserved for future toggles
+    db 0                   ; +23 reserved for future toggles
 
 ;==============================================================================
 ; RAM workspace (page 3, MSX system RAM)

@@ -89,6 +89,8 @@ struct App {
     show_splash: bool,
     boot_music: bool,
     tile: [u8; 8],
+    scroll_dir: u8,
+    tile_color: u8,      // 0 = auto (box colour)
     colors: pack::MenuColors,
     games: Vec<GameEntry>,
     status: String,
@@ -103,6 +105,8 @@ impl Default for App {
             show_splash: true,
             boot_music: true,
             tile: [0; 8],
+            scroll_dir: 1,      // NE, the classic diagonal
+            tile_color: 0,      // auto: follow the box colour
             colors: pack::MenuColors::default(),
             games: Vec::new(),
             status: String::new(),
@@ -152,10 +156,23 @@ fn blit_glyphs(
 
 fn str_width_px(text: &str) -> f32 { text.chars().count() as f32 * 6.0 }
 
+/// (dv, dh) per compass direction — MUST mirror launcher.asm's anim_dirs.
+const DIR_DELTAS: [(i64, i64); 8] = [
+    (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1),
+];
+
+/// One displayed row of the animated tile: vertical shift + right rotation,
+/// same math as launcher.asm's anim_tick.
+fn tile_row_shifted(tile: &[u8; 8], vphase: u8, hphase: u8, r: usize) -> u8 {
+    tile[((r as u8 + vphase) & 7) as usize].rotate_right(hphase as u32)
+}
+
 /// Live simulation of the SCREEN 2 cart menu with the chosen colours, drawn with
-/// the real font so it matches what boots on the MSX.
+/// the real font so it matches what boots on the MSX. The background tile (if
+/// any) scrolls in real time in its chosen direction, like on the cart.
 fn draw_menu_preview(ui: &mut egui::Ui, colors: pack::MenuColors,
-                     title: &str, marquee: &str, rows: &[String]) {
+                     title: &str, marquee: &str, rows: &[String],
+                     tile: &[u8; 8], scroll_dir: u8, tile_color: u8) {
     const MSX_W: f32 = 256.0;
     let n_rows = rows.len().min(5);
     // Layout in MSX px: title box (rows 0..2 = 0..24), list from 24, marquee last.
@@ -177,9 +194,57 @@ fn draw_menu_preview(ui: &mut egui::Ui, colors: pack::MenuColors,
     // Background
     painter.rect_filled(rect, 0.0, bg_c);
 
-    // Title centred on row 1 (y=8), inside a box hugging it (rows 0..2).
+    // Animated background tile, phase-locked to wall time (one step every
+    // ANIM_RATE=8 frames at 60Hz, like the launcher).
+    let animated = tile.iter().any(|&b| b != 0);
+    let (vphase, hphase) = if animated {
+        let steps = (ui.input(|i| i.time) / (8.0 / 60.0)) as i64;
+        let (dv, dh) = DIR_DELTAS[(scroll_dir & 7) as usize];
+        ((steps * dv).rem_euclid(8) as u8, (steps * dh).rem_euclid(8) as u8)
+    } else { (0, 0) };
+    let tile_c = msx_color_rgb(if tile_color == 0 { colors.box_ } else { tile_color });
     let tw = str_width_px(title);
     let tx = ((MSX_W - tw) / 2.0).max(2.0);
+    if animated {
+        let box_lc = ((tx - 4.0) / 8.0).floor() as i32;
+        let box_rc = ((tx + tw + 2.0) / 8.0).ceil() as i32;
+        let total_cell_rows = (msx_h / 8.0).ceil() as i32;
+        for cy in 0..total_cell_rows {
+            for cx in 0..32i32 {
+                // Which cells are tile territory (mirrors the launcher):
+                // title band rows 0 and 2 outside the box; every list cell
+                // right of its row's text; anything below the list.
+                let is_tile = if cy <= 2 {
+                    (cy == 0 || cy == 2) && (cx < box_lc || cx > box_rc)
+                } else {
+                    let li = cy - 3; // list row index (list_top = 24px = cell row 3)
+                    if li < n_rows as i32 {
+                        let w = str_width_px(&rows[li as usize]);
+                        cx as f32 * 8.0 >= 8.0 + w + 1.0
+                    } else {
+                        cy as f32 * 8.0 >= marq_y // gap row before marquee stays bg
+                    }
+                };
+                if !is_tile { continue; }
+                for r in 0..8usize {
+                    let bits = tile_row_shifted(tile, vphase, hphase, r);
+                    for c in 0..8u32 {
+                        if bits & (0x80 >> c) != 0 {
+                            let px = origin.x + (cx as f32 * 8.0 + c as f32) * scale;
+                            let py = origin.y + (cy as f32 * 8.0 + r as f32) * scale;
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(egui::pos2(px, py),
+                                    egui::vec2(scale, scale)), 0.0, tile_c);
+                        }
+                    }
+                }
+            }
+        }
+        // keep the animation running
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    }
+
+    // Title centred on row 1 (y=8), inside a box hugging it (rows 0..2).
     blit_glyphs(&painter, origin, scale, tx, 8.0, title, text_c);
     let box_min = egui::pos2(origin.x + (tx - 4.0) * scale, origin.y);
     let box_max = egui::pos2(origin.x + (tx + tw + 2.0) * scale, origin.y + 23.0 * scale);
@@ -297,7 +362,8 @@ impl eframe::App for App {
                 } else {
                     self.games.iter().take(5).map(|g| g.title.to_uppercase()).collect()
                 };
-                draw_menu_preview(ui, self.colors, &prev_title, &prev_marquee, &prev_rows);
+                draw_menu_preview(ui, self.colors, &prev_title, &prev_marquee, &prev_rows,
+                                  &self.tile, self.scroll_dir, self.tile_color);
 
                 ui.horizontal(|ui| {
                     ui.label("Flash size:");
@@ -321,28 +387,66 @@ impl eframe::App for App {
                         if self.tile.iter().all(|&b| b == 0) { "(off)" } else { "(scrolls diagonally behind the menu)" })
                         .small().color(egui::Color32::GRAY));
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Scroll:");
+                    const DIRS: [(u8, &str); 8] = [
+                        (0, "\u{2191} N"), (1, "\u{2197} NE"), (2, "\u{2192} E"),
+                        (3, "\u{2198} SE"), (4, "\u{2193} S"), (5, "\u{2199} SW"),
+                        (6, "\u{2190} W"), (7, "\u{2196} NW"),
+                    ];
+                    let current = DIRS.iter().find(|(d, _)| *d == self.scroll_dir)
+                        .map(|(_, n)| *n).unwrap_or("?");
+                    egui::ComboBox::from_id_source("tile_scroll_dir")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for (d, name) in DIRS {
+                                ui.selectable_value(&mut self.scroll_dir, d, name);
+                            }
+                        });
+                    ui.label("Colour:");
+                    let cur_name = if self.tile_color == 0 { "Auto (box colour)" }
+                                   else { msx_color_name(self.tile_color) };
+                    let (crect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                    let shown = if self.tile_color == 0 { self.colors.box_ } else { self.tile_color };
+                    ui.painter().rect_filled(crect, 2.0, msx_color_rgb(shown));
+                    egui::ComboBox::from_id_source("tile_color")
+                        .selected_text(cur_name)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.tile_color, 0, "Auto (box colour)");
+                            for (idx, name) in MSX_PALETTE {
+                                ui.horizontal(|ui| {
+                                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                                    ui.painter().rect_filled(r, 2.0, msx_color_rgb(*idx));
+                                    ui.selectable_value(&mut self.tile_color, *idx, *name);
+                                });
+                            }
+                        });
+                });
                 let cell = 14.0;
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(cell * 8.0, cell * 8.0), egui::Sense::hover());
                 let painter = ui.painter_at(rect);
-                let box_col = self.colors.box_;
+                let ink = if self.tile_color == 0 { self.colors.box_ } else { self.tile_color };
                 for row in 0..8usize {
                     for col in 0..8usize {
                         let bit = 0x80u8 >> col;
                         let on = self.tile[row] & bit != 0;
                         let cr = egui::Rect::from_min_size(
                             rect.min + egui::vec2(col as f32 * cell, row as f32 * cell),
-                            egui::vec2(cell - 1.0, cell - 1.0));
+                            egui::vec2(cell, cell));
                         let id = ui.id().with(("tilepx", row, col));
                         let resp = ui.interact(cr, id, egui::Sense::click());
                         if resp.clicked() {
                             self.tile[row] ^= bit;
                         }
-                        painter.rect_filled(cr, 1.0, if on {
-                            msx_color_rgb(box_col)
+                        painter.rect_filled(cr.shrink(0.5), 0.0, if on {
+                            msx_color_rgb(ink)
                         } else {
-                            egui::Color32::from_gray(28)
+                            egui::Color32::from_gray(48)
                         });
+                        // light grid line so the 8x8 layout reads clearly
+                        painter.rect_stroke(cr, 0.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(110)));
                     }
                 }
             });
@@ -534,7 +638,7 @@ impl App {
         // Always apply the marquee field: empty -> blank marquee (not the default).
         let marquee_opt = Some(self.marquee.trim());
         let title_opt = if self.title.trim().is_empty() { None } else { Some(self.title.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.colors);
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.scroll_dir, self.tile_color, self.colors);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }

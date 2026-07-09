@@ -389,6 +389,8 @@ mod title_tests {
             false,               // splash off
             false,               // boot jingle off (asserted below)
             &[0x18u8, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18], // diamond tile
+            3,                   // scroll SE (asserted below)
+            7,                   // tile colour cyan (asserted below)
             colors,
         ).expect("build_image");
         assert_eq!(image.len(), FlashSize::Mb8.bytes());
@@ -407,6 +409,8 @@ mod title_tests {
         assert_eq!(&image[cfg + CFG_TILE_OFF..cfg + CFG_TILE_OFF + 8],
                    &[0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18],
                    "tile must land in cfg block");
+        assert_eq!(image[cfg + CFG_DIR_OFF], 3, "scroll dir must land in cfg block");
+        assert_eq!(image[cfg + CFG_TILECOL_OFF], 7, "tile colour must land in cfg block");
         let out = std::env::temp_dir().join("rust_gui.rom");
         std::fs::write(&out, &image).expect("write rust_gui.rom to temp dir");
     }
@@ -534,6 +538,43 @@ pub fn apply_tile(launcher: &mut [u8], tile: &[u8; 8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Tile scroll direction (launcher.asm cfg_scroll_dir, anchor +21):
+/// 0..7 compass = N, NE, E, SE, S, SW, W, NW.
+pub const CFG_DIR_OFF: usize = 21;
+/// Tile colour nibble (launcher.asm cfg_tile_color, anchor +22):
+/// 1-15 MSX palette, 0 = use the title-box colour.
+pub const CFG_TILECOL_OFF: usize = 22;
+
+pub fn apply_tile_color(launcher: &mut [u8], color: u8) -> Result<(), String> {
+    if color > 15 {
+        return Err(format!("tile colour must be 0-15 (0 = box colour), got {color}"));
+    }
+    let Some(idx) = find_subslice(launcher, CFG_ANCHOR) else {
+        return Err("config anchor not found in launcher.bin".into());
+    };
+    let pos = idx + CFG_TILECOL_OFF;
+    if pos >= launcher.len() {
+        return Err("config anchor too close to end of launcher".into());
+    }
+    launcher[pos] = color;
+    Ok(())
+}
+
+pub fn apply_scroll_dir(launcher: &mut [u8], dir: u8) -> Result<(), String> {
+    if dir > 7 {
+        return Err(format!("scroll direction must be 0-7, got {dir}"));
+    }
+    let Some(idx) = find_subslice(launcher, CFG_ANCHOR) else {
+        return Err("config anchor not found in launcher.bin".into());
+    };
+    let pos = idx + CFG_DIR_OFF;
+    if pos >= launcher.len() {
+        return Err("config anchor too close to end of launcher".into());
+    }
+    launcher[pos] = dir;
+    Ok(())
+}
+
 /// Menu colour nibble offsets within the config block, measured from the start
 /// of CFG_ANCHOR: +8 splash flag, +9 text, +10 bg, +11 box (see launcher.asm
 /// cfg_col_*).
@@ -586,6 +627,8 @@ pub fn build_image(
     show_splash: bool,
     boot_music: bool,
     tile: &[u8; 8],
+    scroll_dir: u8,
+    tile_color: u8,
     colors: MenuColors,
 ) -> Result<(Vec<u8>, Vec<Game>), String> {
     let mut launcher = launcher.to_vec();
@@ -594,6 +637,8 @@ pub fn build_image(
     apply_splash_flag(&mut launcher, show_splash)?;
     apply_music_flag(&mut launcher, boot_music)?;
     apply_tile(&mut launcher, tile)?;
+    apply_scroll_dir(&mut launcher, scroll_dir)?;
+    apply_tile_color(&mut launcher, tile_color)?;
     apply_colors(&mut launcher, colors)?;
     if launcher.len() > LAUNCHER_SIZE {
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));
