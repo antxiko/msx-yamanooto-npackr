@@ -207,8 +207,9 @@ opt_r800      equ RAM_BASE + 71   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session togg
 anim_vphase   equ RAM_BASE + 72   ; 1 byte: tile animation vertical phase (0..7)
 anim_ticker   equ RAM_BASE + 73   ; 1 byte: frame divider for ANIM_RATE
 tile_buf      equ RAM_BASE + 74   ; 8 bytes: rotated tile scratch for anim_tick
-mdr_ncells    equ RAM_BASE + 82   ; 1 byte: text cells of the list row being drawn
+mdr_ncells    equ RAM_BASE + 82   ; 1 byte: text cells of the list/status row being drawn
 anim_hphase   equ RAM_BASE + 83   ; 1 byte: tile animation horizontal phase (0..7)
+dsr_pagcell   equ RAM_BASE + 84   ; 1 byte: first cell of "PAG x/y" (status row remap)
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -768,6 +769,8 @@ draw_status_row:
     ld   (de), a            ; NUL terminate
 
     call clear_linebuf
+    ld   hl, 0
+    ld   (rp_x), hl         ; MSX1 renders no toggles -> left width 0
     ; left: 50/60 toggle state (hidden on MSX1 — no VDP R#9 there)
     ld   a, (msx_version)
     or   a
@@ -794,19 +797,63 @@ dsr_cpu_render:
     ld   a, 36              ; X = 36px (after "50HZ" + gap)
     call render_str_prop
 dsr_no_cpu:
+    ld   a, (rp_x)          ; left text end pixel (fits in the low byte)
+    add  a, 7
+    rrca
+    rrca
+    rrca
+    and  0x1F
+    ld   (mdr_ncells), a    ; N = left text cells, for dsr_nt below
     ; right: "PAG x/y" right-aligned (2px margin)
     ld   hl, pgbuf
     call str_width_px       ; A = width
     ld   b, a
     ld   a, 254
     sub  b                  ; X = 254 - width
+    ld   b, a
+    rrca
+    rrca
+    rrca
+    and  0x1F
+    ld   (dsr_pagcell), a   ; first cell of "PAG x/y" (stays native)
+    ld   a, b
     ld   hl, pgbuf
     call render_str_prop
     ld   b, PAGE_ROW
     call flush_row_pat
     ld   b, PAGE_ROW
     ld   a, (v_col_normal)
-    jp   set_row_color
+    call set_row_color
+    ; fall through to dsr_nt
+
+; dsr_nt — repoint the status row's NT like mdr_nt does for list rows: the
+; toggle cells on the left and the right-aligned "PAG x/y" cells keep their
+; native index, the gap in between shows the background tile.
+dsr_nt:
+    ld   a, (dsr_pagcell)
+    ld   d, a               ; D = first PAG cell
+    ld   a, (mdr_ncells)
+    ld   c, a               ; C = left text cell count
+    ld   hl, NAMBASE + PAGE_ROW*32
+    ld   e, PAGE_ROW*32 & 0xFF ; native value of col 0 (=192)
+    ld   b, 32
+dsn_col:
+    ld   a, 32
+    sub  b                  ; A = current column (0..31)
+    cp   d
+    jr   nc, dsn_native     ; col >= PAG start -> native
+    cp   c
+    jr   c, dsn_native      ; col < left text end -> native
+    ld   a, TILE_IDX        ; the gap in between -> background tile
+    jr   dsn_write
+dsn_native:
+    ld   a, e
+dsn_write:
+    call WRTVRM
+    inc  hl
+    inc  e
+    djnz dsn_col
+    ret
 
 ; udiv_hl_vr — A = HL / VIEW_ROWS (quotient). Preserves DE. Destroys HL, B.
 udiv_hl_vr:
@@ -2629,9 +2676,10 @@ set_row_color_text:
     call FILVRM
     ret
 
-; mdr_nt — repoint this row's NT entries: text cells (0..N-1) keep their
+; mdr_nt — repoint this row's NT entries: text cells (1..N-1) keep their
 ; native index (scr2_init's bitmap fill: value = (row*32+col) & 0xFF), the
-; rest point at the shared background tile. In: B = row.
+; rest point at the shared background tile. Cell 0 is the 8px margin before
+; NAME_X — always blank, so it is handed to the tile as well. In: B = row.
 mdr_nt:
     ld   a, (mdr_ncells)
     ld   c, a               ; C = N
@@ -2652,6 +2700,9 @@ mnt_col:
     or   a
     jr   z, mnt_tile
     dec  c
+    ld   a, b
+    cp   32                 ; col 0 (B still 32): the left margin cell is
+    jr   z, mnt_tile        ;  always blank -> background tile
     ld   a, e               ; native index (text cell)
     jr   mnt_write
 mnt_tile:
@@ -2931,9 +2982,10 @@ colour_box_red:
 ; SCREEN 2 is used as a bitmap (NT = 0..255 x3), so no two cells share a
 ; pattern. bg_remap repoints the decorative background cells at ONE shared
 ; pattern index per third (TILE_IDX, see its equ for the no-collision proof):
-; rows 0/2 outside the title box, the right strip (cols 22..31) of the list
-; rows 3..21, and cols 30..31 of the marquee row. The status row (22) is NOT
-; remapped ("PAG x/y" renders in its right cells). Colour = v_col_box,
+; rows 0..2 outside the title box (mdr_nt handles the list rows 3..21 cell
+; by cell on every redraw). The status row (22) is NOT remapped ("PAG x/y"
+; renders in its right cells) and neither is the marquee row (23), so the
+; scroll text enters at the true right edge. Colour = v_col_box,
 ; written once. anim_tick then animates the three shared patterns from
 ; cfg_tile: each step shifts the tile one row vertically AND rotates it one
 ; bit horizontally -> a 45-degree diagonal scroll. With cfg_tile all zeros
@@ -2942,15 +2994,12 @@ colour_box_red:
 bg_remap:
     ld   d, 0               ; row 0: cells outside the box
     call bgr_toprow
-    ld   d, 2               ; row 2: idem (row 1 stays background — looks
-    call bgr_toprow         ;  better with breathing room around the box)
-    ; (list rows 3..21 are remapped per-row by mdr_nt on every redraw)
-    ld   hl, NAMBASE + 23*32 + 30
-    ld   a, TILE_IDX
-    call WRTVRM
-    inc  hl
-    ld   a, TILE_IDX
-    call WRTVRM
+    ld   d, 1               ; row 1: idem (title row — tile up to the box edge)
+    call bgr_toprow
+    ld   d, 2               ; row 2: idem
+    call bgr_toprow
+    ; (list rows 3..21 are remapped per-row by mdr_nt on every redraw; the
+    ;  marquee row keeps all its native cells so text scrolls in at column 31)
     ; colour the three shared tiles (one 8-byte fill per third): explicit
     ; cfg_tile_color (<<4 over the menu bg nibble), or the box colour when 0
     ld   a, (cfg_tile_color)
