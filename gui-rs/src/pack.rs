@@ -385,7 +385,9 @@ mod title_tests {
         let colors = MenuColors { text: 7, bg: 4, box_: 11 }; // cyan / dark-blue / light-yellow
         let (image, dropped) = build_image(
             &launcher, &mut games, FlashSize::Mb8,
-            Some(""), Some("MI TITULO GUI"), false,   // empty marquee -> blank
+            Some(""), Some("MI TITULO GUI"),
+            false,     // splash off
+            false,     // boot jingle off (asserted below)
             colors,
         ).expect("build_image");
         assert_eq!(image.len(), FlashSize::Mb8.bytes());
@@ -400,6 +402,7 @@ mod title_tests {
         assert_eq!(image[cfg + CFG_COL_TEXT_OFF], 7);
         assert_eq!(image[cfg + CFG_COL_BG_OFF], 4);
         assert_eq!(image[cfg + CFG_COL_BOX_OFF], 11);
+        assert_eq!(image[cfg + CFG_MUSIC_OFF], 0, "boot_music=false must land in cfg block");
         let out = std::env::temp_dir().join("rust_gui.rom");
         std::fs::write(&out, &image).expect("write rust_gui.rom to temp dir");
     }
@@ -465,6 +468,22 @@ mod title_tests {
         assert!(apply_colors(&mut lb, MenuColors { text: 0, bg: 1, box_: 8 }).is_err());
         assert!(apply_colors(&mut lb, MenuColors { text: 16, bg: 1, box_: 8 }).is_err());
     }
+
+    #[test]
+    fn apply_music_flag_patches_cfg_byte() {
+        // minimal launcher: cfg block layout mirrors launcher.asm
+        // (+8 splash, +9..11 colours, +12 music, +13..20 tile, +21..23 rsvd)
+        let mut lb = Vec::new();
+        lb.extend_from_slice(CFG_ANCHOR);
+        lb.extend_from_slice(&[1, 15, 1, 8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let i = find_subslice(&lb, CFG_ANCHOR).unwrap();
+        apply_music_flag(&mut lb, false).unwrap();
+        assert_eq!(lb[i + CFG_MUSIC_OFF], 0);
+        apply_music_flag(&mut lb, true).unwrap();
+        assert_eq!(lb[i + CFG_MUSIC_OFF], 1);
+        // neighbours untouched
+        assert_eq!((lb[i + 8], lb[i + 9], lb[i + CFG_TILE_OFF]), (1, 15, 0));
+    }
 }
 
 pub fn apply_splash_flag(launcher: &mut [u8], show_splash: bool) -> Result<(), String> {
@@ -476,6 +495,24 @@ pub fn apply_splash_flag(launcher: &mut [u8], show_splash: bool) -> Result<(), S
         return Err("config anchor too close to end of launcher".into());
     }
     launcher[flag_pos] = if show_splash { 1 } else { 0 };
+    Ok(())
+}
+
+/// Boot-jingle flag offset within the config block (launcher.asm
+/// cfg_music_enable): anchor +12. 1 = play (launcher default), 0 = silent.
+pub const CFG_MUSIC_OFF: usize = 12;
+/// 8-byte background tile (launcher.asm cfg_tile): anchor +13..+20.
+pub const CFG_TILE_OFF: usize = 13;
+
+pub fn apply_music_flag(launcher: &mut [u8], boot_music: bool) -> Result<(), String> {
+    let Some(idx) = find_subslice(launcher, CFG_ANCHOR) else {
+        return Err("config anchor not found in launcher.bin".into());
+    };
+    let pos = idx + CFG_MUSIC_OFF;
+    if pos >= launcher.len() {
+        return Err("config anchor too close to end of launcher".into());
+    }
+    launcher[pos] = if boot_music { 1 } else { 0 };
     Ok(())
 }
 
@@ -529,12 +566,14 @@ pub fn build_image(
     marquee: Option<&str>,
     title: Option<&str>,
     show_splash: bool,
+    boot_music: bool,
     colors: MenuColors,
 ) -> Result<(Vec<u8>, Vec<Game>), String> {
     let mut launcher = launcher.to_vec();
     apply_marquee(&mut launcher, marquee)?;
     apply_title(&mut launcher, title)?;
     apply_splash_flag(&mut launcher, show_splash)?;
+    apply_music_flag(&mut launcher, boot_music)?;
     apply_colors(&mut launcher, colors)?;
     if launcher.len() > LAUNCHER_SIZE {
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));

@@ -87,6 +87,7 @@ struct App {
     title: String,
     flash_size: FlashSize,
     show_splash: bool,
+    boot_music: bool,
     colors: pack::MenuColors,
     games: Vec<GameEntry>,
     status: String,
@@ -99,6 +100,7 @@ impl Default for App {
             title: String::new(),
             flash_size: FlashSize::Mb8,
             show_splash: true,
+            boot_music: true,
             colors: pack::MenuColors::default(),
             games: Vec::new(),
             status: String::new(),
@@ -302,6 +304,7 @@ impl eframe::App for App {
                 });
 
                 ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
+                ui.checkbox(&mut self.boot_music, "Boot jingle (Konami-style chime)");
             });
 
             ui.add_space(8.0);
@@ -491,7 +494,7 @@ impl App {
         // Always apply the marquee field: empty -> blank marquee (not the default).
         let marquee_opt = Some(self.marquee.trim());
         let title_opt = if self.title.trim().is_empty() { None } else { Some(self.title.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.colors);
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.boot_music, self.colors);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }

@@ -283,6 +283,8 @@ CFG_ANCHOR = b"YMNTCFG!"
 CFG_COL_TEXT_OFF = 9   # offsets from the anchor start
 CFG_COL_BG_OFF = 10
 CFG_COL_BOX_OFF = 11
+CFG_MUSIC_OFF = 12     # boot jingle enable (see launcher.asm cfg_music_enable)
+CFG_TILE_OFF = 13      # 8-byte background tile (launcher.asm cfg_tile)
 
 # MSX1 (TMS9918) palette. Index 0 is transparent; menu colours use 1-15.
 MSX_COLORS = {
@@ -329,6 +331,23 @@ def _apply_colors(launcher_bytes: bytes, text=None, bg=None, box=None) -> bytes:
         if val is None:
             continue
         data[idx + off] = _parse_color(val)
+    return bytes(data)
+
+
+def _apply_music(launcher_bytes: bytes, enable) -> bytes:
+    """Patch the boot-jingle flag in the YMNTCFG! block (byte +12). None keeps
+    the launcher default (jingle plays); True/False force it on/off."""
+    if enable is None:
+        return launcher_bytes
+    data = bytearray(launcher_bytes)
+    idx = data.find(CFG_ANCHOR)
+    if idx < 0:
+        raise RuntimeError(
+            "boot_music: 'YMNTCFG!' config anchor not found in launcher.bin. "
+            "Rebuild it with pasmo from a version that supports the music flag.")
+    if data.find(CFG_ANCHOR, idx + 1) >= 0:
+        raise RuntimeError("boot_music: config anchor found more than once in launcher.bin.")
+    data[idx + CFG_MUSIC_OFF] = 1 if enable else 0
     return bytes(data)
 
 
@@ -794,6 +813,10 @@ def cmd_build(args):
     col_box = args.color_box if args.color_box is not None else lcfg.get("color_box")
     launcher_data = _apply_colors(launcher_data, col_text, col_bg, col_box)
 
+    # Boot jingle: CLI --no-boot-music overrides TOML [launcher].boot_music.
+    boot_music = False if args.no_boot_music else lcfg.get("boot_music")
+    launcher_data = _apply_music(launcher_data, boot_music)
+
     config_dir = Path(args.config).resolve().parent
     games = []
     for entry in cfg.get("games", []):
@@ -1018,6 +1041,7 @@ def cmd_pack_folder(args):
     launcher_data = _apply_marquee(launcher_data, args.marquee if args.marquee is not None else "")
     launcher_data = _apply_title(launcher_data, args.title)
     launcher_data = _apply_colors(launcher_data, args.color_text, args.color_bg, args.color_box)
+    launcher_data = _apply_music(launcher_data, False if args.no_boot_music else None)
 
     rom_paths = sorted(folder.glob("*.rom")) + sorted(folder.glob("*.ROM"))
 
@@ -1142,6 +1166,9 @@ def main():
                     help="Menu background colour (1-15 or name). Also [launcher].color_bg.")
     pb.add_argument("--color-box", type=_parse_color, default=None, metavar="COLOR",
                     help="Title-box colour (1-15 or name). Also [launcher].color_box.")
+    pb.add_argument("--no-boot-music", action="store_true",
+                    help="Silence the boot jingle (also [launcher].boot_music = false "
+                         "in the TOML). Default: jingle plays.")
     pb.set_defaults(func=cmd_build)
 
     pt = sub.add_parser("test", help="Build minimal test image with dummy entries")
@@ -1180,6 +1207,8 @@ def main():
                     help="Menu background colour (1-15 or name).")
     pf.add_argument("--color-box", type=_parse_color, default=None, metavar="COLOR",
                     help="Title-box colour (1-15 or name).")
+    pf.add_argument("--no-boot-music", action="store_true",
+                    help="Silence the boot jingle. Default: jingle plays.")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()

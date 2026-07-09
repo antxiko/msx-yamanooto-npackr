@@ -232,7 +232,11 @@ init:
 
     ei
 
-    call play_jingle        ; Konami-style boot chime (PSG)
+    ; Boot chime is played only if cfg_music_enable is non-zero. The builders
+    ; flip that byte in the config block (same mechanism as the splash flag).
+    ld   a, (cfg_music_enable)
+    or   a
+    call nz, play_jingle    ; Konami-style boot chime (PSG)
 
     ; --- load directory header (paged in at A000-BFFF) ---
     call dir_page_in
@@ -2809,8 +2813,12 @@ cfg_col_bg:
     db 1                   ; +10 background colour nibble. Default black.
 cfg_col_box:
     db 8                   ; +11 title-box colour nibble. Default medium red.
+cfg_music_enable:
+    db 1                   ; +12 0 = skip boot jingle, 1 = play (default)
+cfg_tile:
+    db 0, 0, 0, 0, 0, 0, 0, 0 ; +13..20 background tile 8x8 (all-0 = plain bg)
 cfg_reserved:
-    db 0, 0, 0, 0          ; +12..15 reserved for future toggles
+    db 0, 0, 0             ; +21..23 reserved for future toggles
 
 ;==============================================================================
 ; RAM workspace (page 3, MSX system RAM)
