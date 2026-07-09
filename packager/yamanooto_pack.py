@@ -85,6 +85,9 @@ MAPPER_GM2         = 'gm2'         # Game Master 2 patched by gm2_to_yamanooto.p
 MAPPER_MG2         = 'mg2'         # Metal Gear 2 patched by mg2_to_yamanooto.py —
                                     # KonamiSCC + appended micro save-driver +
                                     # three 64KB save sectors (SNAK1/2/3).
+MAPPER_MG1         = 'mg1'         # Metal Gear 1 patched by mg1_to_yamanooto.py —
+                                    # Konami-4 + appended virtual-tape driver bank +
+                                    # one 64KB save sector at relative bank 0x18.
 
 # -----------------------------------------------------------------------------
 # Mapper auto-detection via openMSX softwaredb (SHA1 -> mapper type)
@@ -474,6 +477,16 @@ class Game:
             # in absolute flash. (Was 3x64KB=768KB before the append rewrite.)
             self.banks = (0, 1, 2, 3)
             self.footprint_units = 20
+        elif mapper == MAPPER_MG1:
+            # Metal Gear 1, patched by mg1_to_yamanooto.py (128KB K4 ROM +
+            # 8KB virtual-tape driver at relative bank 0x10). Its cassette
+            # save/load is redirected to ONE 64KB sector at relative bank
+            # 0x18 (banks 0x18-0x1F, left 0xFF here). Footprint = 256KB
+            # (8 units), placed at an even OFFR so the sector stays
+            # 64KB-aligned in absolute flash. Plain K4 launch (no helper).
+            self.banks = (0, 1, 2, 3)
+            self.flags = FLAG_K4
+            self.footprint_units = 8
         elif mapper == MAPPER_GM2:
             # Game Master 2, bespoke-patched by gm2_to_yamanooto.py. Runs in
             # NATIVE K4 mode (GM2's bank regs are Konami4's) with its SRAM-disk
@@ -554,9 +567,10 @@ def pack_games(games, *, skip_overflow=False):
 
     # Partition games
     scc_games  = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2)]
-    sram_games = [g for g in games if g.sram_type is not None]
+    sram_games = [g for g in games
+                  if g.sram_type is not None or g.mapper == MAPPER_MG1]
     non_scc    = [g for g in games
-                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2)
+                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2, MAPPER_MG1)
                   and g.sram_type is None]
 
     # Sort SCC games by size descending (place biggest first to avoid fragmentation).
@@ -607,7 +621,9 @@ def pack_games(games, *, skip_overflow=False):
     for g in sram_games:
         size_units = max(1, (len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT)
         data_units = _align_up(size_units, 2)
-        total_units = data_units + 2          # + 64KB save sector
+        # footprint_units (mg1: 8 = ROM+driver+pad+sector, sector position
+        # baked into its driver) overrides the data+sector computation.
+        total_units = g.footprint_units or (data_units + 2)
         placed_here = False
         start = _align_up(GAMES_POOL_START // OFFR_UNIT, 2)
         while start + total_units <= n_slots:
@@ -616,8 +632,10 @@ def pack_games(games, *, skip_overflow=False):
                     occupied[i] = True
                 g.offr = start
                 g.flash_offset = start * OFFR_UNIT
-                # sector base in 8KB banks (what the launcher's SECREL uses)
-                g.save_sector_bank = (start + data_units) * 4
+                if g.sram_type is not None:
+                    # sector base in 8KB banks (launcher SECREL games only;
+                    # mg1's driver reaches its sector relatively on its own)
+                    g.save_sector_bank = (start + data_units) * 4
                 placed.append(g)
                 placed_here = True
                 break
