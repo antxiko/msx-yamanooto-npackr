@@ -88,6 +88,7 @@ struct App {
     flash_size: FlashSize,
     show_splash: bool,
     boot_music: bool,
+    tile: [u8; 8],
     colors: pack::MenuColors,
     games: Vec<GameEntry>,
     status: String,
@@ -101,6 +102,7 @@ impl Default for App {
             flash_size: FlashSize::Mb8,
             show_splash: true,
             boot_music: true,
+            tile: [0; 8],
             colors: pack::MenuColors::default(),
             games: Vec::new(),
             status: String::new(),
@@ -305,6 +307,44 @@ impl eframe::App for App {
 
                 ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
                 ui.checkbox(&mut self.boot_music, "Boot jingle (Konami-style chime)");
+
+                // 8x8 background tile editor (baked into the launcher; the
+                // menu scrolls it diagonally in the background). All-off =
+                // no tile (classic look).
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Background tile:");
+                    if ui.small_button("Clear").clicked() {
+                        self.tile = [0; 8];
+                    }
+                    ui.label(egui::RichText::new(
+                        if self.tile.iter().all(|&b| b == 0) { "(off)" } else { "(scrolls diagonally behind the menu)" })
+                        .small().color(egui::Color32::GRAY));
+                });
+                let cell = 14.0;
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(cell * 8.0, cell * 8.0), egui::Sense::hover());
+                let painter = ui.painter_at(rect);
+                let box_col = self.colors.box_;
+                for row in 0..8usize {
+                    for col in 0..8usize {
+                        let bit = 0x80u8 >> col;
+                        let on = self.tile[row] & bit != 0;
+                        let cr = egui::Rect::from_min_size(
+                            rect.min + egui::vec2(col as f32 * cell, row as f32 * cell),
+                            egui::vec2(cell - 1.0, cell - 1.0));
+                        let id = ui.id().with(("tilepx", row, col));
+                        let resp = ui.interact(cr, id, egui::Sense::click());
+                        if resp.clicked() {
+                            self.tile[row] ^= bit;
+                        }
+                        painter.rect_filled(cr, 1.0, if on {
+                            msx_color_rgb(box_col)
+                        } else {
+                            egui::Color32::from_gray(28)
+                        });
+                    }
+                }
             });
 
             ui.add_space(8.0);
@@ -494,7 +534,7 @@ impl App {
         // Always apply the marquee field: empty -> blank marquee (not the default).
         let marquee_opt = Some(self.marquee.trim());
         let title_opt = if self.title.trim().is_empty() { None } else { Some(self.title.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.boot_music, self.colors);
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.colors);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }

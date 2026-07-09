@@ -386,8 +386,9 @@ mod title_tests {
         let (image, dropped) = build_image(
             &launcher, &mut games, FlashSize::Mb8,
             Some(""), Some("MI TITULO GUI"),
-            false,     // splash off
-            false,     // boot jingle off (asserted below)
+            false,               // splash off
+            false,               // boot jingle off (asserted below)
+            &[0x18u8, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18], // diamond tile
             colors,
         ).expect("build_image");
         assert_eq!(image.len(), FlashSize::Mb8.bytes());
@@ -403,6 +404,9 @@ mod title_tests {
         assert_eq!(image[cfg + CFG_COL_BG_OFF], 4);
         assert_eq!(image[cfg + CFG_COL_BOX_OFF], 11);
         assert_eq!(image[cfg + CFG_MUSIC_OFF], 0, "boot_music=false must land in cfg block");
+        assert_eq!(&image[cfg + CFG_TILE_OFF..cfg + CFG_TILE_OFF + 8],
+                   &[0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18],
+                   "tile must land in cfg block");
         let out = std::env::temp_dir().join("rust_gui.rom");
         std::fs::write(&out, &image).expect("write rust_gui.rom to temp dir");
     }
@@ -516,6 +520,20 @@ pub fn apply_music_flag(launcher: &mut [u8], boot_music: bool) -> Result<(), Str
     Ok(())
 }
 
+/// Bake the 8x8 background tile into the config block (launcher.asm cfg_tile,
+/// anchor +13..+20). All-zeros = no visible tile (the launcher default).
+pub fn apply_tile(launcher: &mut [u8], tile: &[u8; 8]) -> Result<(), String> {
+    let Some(idx) = find_subslice(launcher, CFG_ANCHOR) else {
+        return Err("config anchor not found in launcher.bin".into());
+    };
+    let pos = idx + CFG_TILE_OFF;
+    if pos + 8 > launcher.len() {
+        return Err("config anchor too close to end of launcher".into());
+    }
+    launcher[pos..pos + 8].copy_from_slice(tile);
+    Ok(())
+}
+
 /// Menu colour nibble offsets within the config block, measured from the start
 /// of CFG_ANCHOR: +8 splash flag, +9 text, +10 bg, +11 box (see launcher.asm
 /// cfg_col_*).
@@ -567,6 +585,7 @@ pub fn build_image(
     title: Option<&str>,
     show_splash: bool,
     boot_music: bool,
+    tile: &[u8; 8],
     colors: MenuColors,
 ) -> Result<(Vec<u8>, Vec<Game>), String> {
     let mut launcher = launcher.to_vec();
@@ -574,6 +593,7 @@ pub fn build_image(
     apply_title(&mut launcher, title)?;
     apply_splash_flag(&mut launcher, show_splash)?;
     apply_music_flag(&mut launcher, boot_music)?;
+    apply_tile(&mut launcher, tile)?;
     apply_colors(&mut launcher, colors)?;
     if launcher.len() > LAUNCHER_SIZE {
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));
