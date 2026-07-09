@@ -12,6 +12,10 @@
 //   - ASCII8 / ASCII16 in-memory conversion (those ROMs come up "unsupported")
 //   - SCC patcher (we fall back to 4× mirror for <512K SCC games)
 
+// Windows: GUI subsystem in release (no console window on launch); keep the
+// console in debug builds so eprintln! diagnostics stay visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod convert;
 mod mapper;
 mod pack;
