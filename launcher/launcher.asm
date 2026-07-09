@@ -45,6 +45,11 @@ FORCLR  equ 0xF3E9          ; foreground colour
 BAKCLR  equ 0xF3EA          ; background colour
 BDRCLR  equ 0xF3EB          ; border colour
 
+; Machine detection + per-machine features (see msx.org wiki / grauw)
+MSXVER  equ 0x002D          ; Main-ROM: 0=MSX1 1=MSX2 2=MSX2+ 3=turbo R
+CHGCPU  equ 0x0180          ; turbo R BIOS: A bits1-0 00=Z80 01=R800ROM 10=R800DRAM, bit7=LED
+RG9SAV  equ 0xFFE8          ; system RAM: mirror of VDP R#9 (bit1 NT: 1=50Hz 0=60Hz)
+
 ;------------------------------------------------------------------------------
 ; SCREEN 2 VRAM layout (standard) + the font-blitter menu palette.
 ;------------------------------------------------------------------------------
@@ -181,6 +186,9 @@ v_col_hilite  equ RAM_BASE + 65   ; 1 byte: selection bar    = bg<<4 | text (inv
 v_col_box     equ RAM_BASE + 66   ; 1 byte: title box edges   = box<<4 | bg
 sel_index     equ RAM_BASE + 67   ; 2 bytes: directory index of the launched game
                                   ; (needed to look up its SRAM-table entry)
+msx_version   equ RAM_BASE + 69   ; 1 byte: BIOS 0x002D cached at boot
+opt_hz        equ RAM_BASE + 70   ; 1 byte: 0 = 50Hz, 1 = 60Hz (session toggle, '5' key)
+opt_r800      equ RAM_BASE + 71   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session toggle, '8' key)
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -223,6 +231,22 @@ init:
     and  0xCF               ; clear page 2 bits
     or   c                  ; page 2 = page 1 slot
     out  (0xA8), a
+
+    ; --- machine detection (page 0 = main BIOS during cart INIT, so the
+    ;     version byte can be read directly; RDSLT would be the robust
+    ;     fallback if this ever runs with page 0 remapped) ---
+    ld   a, (MSXVER)        ; 0=MSX1 1=MSX2 2=MSX2+ 3=turbo R
+    ld   (msx_version), a
+    ; Seed the 50/60 toggle from the BIOS mirror of VDP R#9 so the status row
+    ; shows the machine's real frequency. Only meaningful on MSX2 and up; on
+    ; MSX1 the toggle stays hidden and unused (RG9SAV may hold garbage there).
+    ld   a, (RG9SAV)
+    and  2
+    rrca                    ; bit1 -> bit0: 1 = 50Hz
+    xor  1                  ; opt_hz: 0 = 50Hz, 1 = 60Hz
+    ld   (opt_hz), a
+    xor  a
+    ld   (opt_r800), a      ; CPU toggle always boots as Z80 (turbo R default)
 
     ; --- screen setup (SCREEN 2) using the packager-configured colours ---
     call init_colors        ; build v_col_* in RAM + set FORCLR/BAKCLR/BDRCLR
@@ -271,7 +295,34 @@ main_loop:
     jp   z, do_launch
     cp   ' '
     jp   z, do_launch
+    cp   '5'                ; mnemonic "50/60"
+    jp   z, toggle_hz
+    cp   '8'                ; mnemonic "R800"
+    jp   z, toggle_r800
     call menu_jump_letter   ; A = key; jumps if it's a letter, else no-op
+    jp   main_loop
+
+; toggle_hz / toggle_r800 — flip the session toggles ('5' / '8' keys).
+; Silently ignored on machines without the feature (no UI is shown there
+; either, so the keys look dead — intended).
+toggle_hz:
+    ld   a, (msx_version)
+    or   a
+    jp   z, main_loop       ; MSX1: no VDP R#9
+    ld   a, (opt_hz)
+    xor  1
+    ld   (opt_hz), a
+    call draw_status_row
+    jp   main_loop
+
+toggle_r800:
+    ld   a, (msx_version)
+    cp   3
+    jp   c, main_loop       ; not a turbo R: CHGCPU does not exist
+    ld   a, (opt_r800)
+    xor  1
+    ld   (opt_r800), a
+    call draw_status_row
     jp   main_loop
 
 do_launch:
@@ -638,11 +689,15 @@ mjl_found:
     jp   menu_redraw_list
 
 ;------------------------------------------------------------------------------
-; draw_page_indicator — "x/y" (page/total) in the bottom-right corner, sharing
-; row 23 with the marquee (which only flushes the left cells). Redrawn from
-; menu_redraw_list, i.e. only when the page/view changes.
+; draw_status_row (a.k.a. draw_page_indicator) — the PAGE_ROW status line:
+; left = machine toggles ("50HZ"/"60HZ" if the machine is MSX2 or better,
+; "Z80"/"R800" if turbo R), right = "PAG x/y". Everything is rendered into ONE
+; LINEBUF and flushed ONCE: flush_row_pat writes the whole 256-byte row, so
+; drawing the parts separately would erase each other. Redrawn from
+; menu_redraw_list and from the '5'/'8' toggle handlers.
 ;------------------------------------------------------------------------------
-draw_page_indicator:
+draw_page_indicator:        ; legacy name kept for existing callers
+draw_status_row:
     ld   de, pgbuf
     ld   a, 'P'
     ld   (de), a
@@ -670,15 +725,47 @@ draw_page_indicator:
     call put_u8
     xor  a
     ld   (de), a            ; NUL terminate
-    ; right-align on PAGE_ROW (its own row, above the marquee)
+
+    call clear_linebuf
+    ; left: 50/60 toggle state (hidden on MSX1 — no VDP R#9 there)
+    ld   a, (msx_version)
+    or   a
+    jr   z, dsr_no_hz
+    ld   a, (opt_hz)
+    or   a
+    ld   hl, msg_hz50
+    jr   z, dsr_hz_render
+    ld   hl, msg_hz60
+dsr_hz_render:
+    ld   a, 2               ; X = 2px
+    call render_str_prop
+dsr_no_hz:
+    ; next: CPU toggle state (turbo R only)
+    ld   a, (msx_version)
+    cp   3
+    jr   c, dsr_no_cpu
+    ld   a, (opt_r800)
+    or   a
+    ld   hl, msg_z80
+    jr   z, dsr_cpu_render
+    ld   hl, msg_r800
+dsr_cpu_render:
+    ld   a, 36              ; X = 36px (after "50HZ" + gap)
+    call render_str_prop
+dsr_no_cpu:
+    ; right: "PAG x/y" right-aligned (2px margin)
     ld   hl, pgbuf
     call str_width_px       ; A = width
     ld   b, a
     ld   a, 254
-    sub  b                  ; X = 254 - width (2px right margin)
-    ld   b, PAGE_ROW
+    sub  b                  ; X = 254 - width
     ld   hl, pgbuf
-    jp   blit_line_at
+    call render_str_prop
+    ld   b, PAGE_ROW
+    call flush_row_pat
+    ld   b, PAGE_ROW
+    ld   a, (v_col_normal)
+    jp   set_row_color
 
 ; udiv_hl_vr — A = HL / VIEW_ROWS (quotient). Preserves DE. Destroys HL, B.
 udiv_hl_vr:
@@ -752,12 +839,27 @@ TRAMP_PARAMS equ 0xC100     ; parameter area read by trampoline (after code)
 P_CFGR       equ TRAMP_PARAMS + 0   ; 1 byte
 P_OFFR       equ TRAMP_PARAMS + 1   ; 1 byte
 P_BANKS      equ TRAMP_PARAMS + 2   ; 4 bytes
+P_ECHO       equ TRAMP_PARAMS + 6   ; 1 byte: preserved CFGR ECHO bit (0x00/0x02)
 
 launch_game:
     ; HL -> entry in paged-in flash (0xA000+). Copy 32 bytes to RAM cache.
     ld   de, entry_cache
     ld   bc, DIR_ENTRY_SIZE
     ldir
+
+    ; --- turbo R: switch to R800 DRAM if the user toggled it ('8'). ---
+    ; Called BEFORE di, with page 0 = BIOS: CHGCPU is a normal BIOS call and
+    ; only exists on turbo R — the double guard (machine AND toggle) means
+    ; MSX1/2/2+ can never reach it (calling it there would crash).
+    ld   a, (msx_version)
+    cp   3
+    jr   c, lg_no_r800
+    ld   a, (opt_r800)
+    or   a
+    jr   z, lg_no_r800
+    ld   a, 0x82            ; bits1-0 = 10 (R800 DRAM) + bit7 (turbo LED)
+    call CHGCPU
+lg_no_r800:
 
     di
 
@@ -798,6 +900,29 @@ launch_game:
     and  FLAG_SRAM
     call nz, sram_setup
 
+    ; --- 50/60Hz: apply the '5' toggle to VDP R#9 AND its BIOS mirror ---
+    ; RG9SAV must be updated too or the BIOS reverts R#9 on the next screen
+    ; change. Best-effort v1: games that rewrite R#9 in their own init will
+    ; override this. Skipped on MSX1 (no R#9 on the TMS9918).
+    ld   a, (msx_version)
+    or   a
+    jr   z, lg_no_hz
+    ld   a, (RG9SAV)
+    and  0xFD               ; clear bit1 (NT)
+    ld   b, a
+    ld   a, (opt_hz)
+    or   a                  ; 0 = 50Hz -> NT=1, 1 = 60Hz -> NT=0
+    ld   a, 2
+    jr   z, lg_hz_set
+    xor  a
+lg_hz_set:
+    or   b
+    ld   (RG9SAV), a
+    out  (0x99), a          ; data byte (interrupts are off: pair is atomic)
+    ld   a, 0x80 | 9
+    out  (0x99), a          ; write register 9
+lg_no_hz:
+
     ; Copy trampoline code to RAM
     ld   hl, trampoline_src
     ld   de, TRAMP_RAM
@@ -816,6 +941,20 @@ trampoline_src:
     ; Open register access (REGEN=1, WREN=0)
     ld   a, ENAR_REGEN
     ld   (YAMA_ENAR), a
+
+    ; Preserve the user's Echo Mode (PSG mirroring to the cart's minijack,
+    ; enabled by holding HOME at power-on; CFGR survives resets on real
+    ; hardware). Both CFGR writes below would wipe it otherwise. The AND also
+    ; masks FPGA_WAIT (bit 7 reads back as 1) and every other stray bit. We
+    ; only ever PRESERVE the bit — never set it ourselves (on real hardware
+    ; ECHO may not be software-settable at all).
+    ld   a, (YAMA_CFGR)
+    and  CFGR_ECHO
+    ld   (P_ECHO), a
+    ld   b, a
+    ld   a, (P_CFGR)
+    or   b
+    ld   (P_CFGR), a        ; final CFGR (STEP 3) now carries ECHO
 
     ; If FLAG_ASCII16 is set, install the ASCII16->K5 helper at 0xF000.
     ld   a, (entry_cache + DIR_FLAGS)
@@ -850,11 +989,16 @@ tramp_no_helper:
     ldir
 tramp_no_scc_helper:
 
-    ; STEP 1: Force CFGR to a clean K5/SCC state with no MDIS.
-    ; Bank writes via Konami-SCC addresses (5000/7000/9000/B000) only fire
-    ; when K4=0 AND MDIS=0. The final CFGR (K4/MDIS) is applied after the
-    ; bank writes so the game inherits the correct state.
-    xor  a
+    ; STEP 1: CFGR with K4=0/MDIS=0 (so the K5-style bank writes below fire)
+    ; but with the game's SUBOFF bits ALREADY SET. openMSX 21.0 (and, per the
+    ; hardware notes in Yamanooto.cc, most likely the real cart too) latches
+    ; OFFR*4 + SUBOFF into each bank register AT BANK-WRITE TIME; writing
+    ; SUBOFF after the bank writes does NOT remap them. With the old order
+    ; (CFGR=0 -> banks -> CFGR final) a sub-placed game booted its unit's
+    ; slot-0 NEIGHBOUR (verified with signed dummies in openMSX). The
+    ; preserved ECHO bit rides along; neither bit interferes with bank writes.
+    ld   a, (P_CFGR)
+    and  0x32               ; CFGR_SUBOFF | CFGR_ECHO
     ld   (YAMA_CFGR), a
 
     ; OFFR — game position (32K units). Has no effect until a mapper write.
@@ -871,8 +1015,9 @@ tramp_no_scc_helper:
     ld   a, (P_BANKS + 3)
     ld   (MAP_BANK3), a
 
-    ; STEP 3: apply final CFGR (K4 / MDIS / SUBOFF / ROMDIS=0 / ECHO=0).
-    ; After this, the cartridge behaves exactly like the original cart.
+    ; STEP 3: apply final CFGR (K4 / MDIS / SUBOFF / ROMDIS=0 / ECHO
+    ; preserved from boot). After this, the cartridge behaves exactly like
+    ; the original cart.
     ld   a, (P_CFGR)
     ld   (YAMA_CFGR), a
 
@@ -2730,6 +2875,16 @@ msg_dashes:
     db   "----------------------------------------",0
 msg_footer:
     db   " UP/DN  ENTER:launch  RESET:back",0
+
+; Status-row toggle labels ('5' = 50/60Hz on MSX2+, '8' = CPU on turbo R)
+msg_hz50:
+    db   "50HZ",0
+msg_hz60:
+    db   "60HZ",0
+msg_z80:
+    db   "Z80",0
+msg_r800:
+    db   "R800",0
 
 ;------------------------------------------------------------------------------
 ; Scrolling marquee text. Stored twice so the 40-char display window never
