@@ -1,134 +1,108 @@
-# Development handoff — night session results + what's next
+# Development handoff — estado tras la maratón 2026-07-04 → 2026-07-06
 
-> Continuation notes. Snapshot: 2026-07-05, after the Windows night session
-> (commits `d53722a`, `c71431b`, `446ca09` on `main`). Previous handoff topic
-> (SRAM saves / MG2) is DONE and shipped earlier; this session delivered the
-> CFGR SUBOFF packing plus launcher features.
+> Continuation notes. Snapshot: 2026-07-06, `main` en `1397c61` (9 commits de la
+> maratón: d53722a, c71431b, 446ca09, 493374a, f226cb0, 2cd3eb2, 7c86f23,
+> 976616f, a63a580, 1397c61). Gate forense VERDE en cada uno.
+> Esta tarde: sesión de pruebas del usuario (lista al final).
 
-## What shipped this session (all verified, see commit messages for evidence)
+## Qué hay hecho y verificado (por el usuario en openMSX salvo nota)
 
-1. **SUBOFF packing (d53722a)** — small K4/plain games (≤16KB) now share a 32KB
-   OFFR unit at 8KB granularity via CFGR SUBOFF (bits 4-5), in **both builders**
-   (`yamanooto_pack.py` AND `gui-rs/src/pack.rs`, algorithm mirrored 1:1, twin
-   parity tests). 24 real 16KB Konami carts → 12 units (384KB reclaimed).
-   `cmd_test` was broken (tuple unpack TypeError) — fixed and turned into a real
-   self-test with hand-computed placement asserts. Rust test no longer writes to
-   /tmp (Windows).
-2. **⚠ THE OLD HANDOFF WAS WRONG about "launch side already wired, packer-only
-   change".** The trampoline wrote the bank registers BEFORE setting SUBOFF in
-   CFGR, and openMSX 21.0 (`Yamanooto.cc:242`) — and per its hardware notes most
-   likely the real cart too — **latches OFFR*4+SUBOFF at bank-write time**. Every
-   sub-placed game booted its unit's slot-0 neighbour (user asked for Athletic
-   Land, got Antarctic Adventure; confirmed with signature-marked dummies).
-   Fixed in `446ca09`: trampoline STEP 1 now writes CFGR = SUBOFF|ECHO (K4/MDIS
-   still 0) before priming banks. **Re-verify on real hardware** — if the real
-   cart resolves banks dynamically instead of latching, the fix is still
-   harmless.
-3. **Boot jingle build-time flag (c71431b)** — `YMNTCFG!` block byte +12
-   (`cfg_music_enable`), `[launcher] boot_music` / `--no-boot-music` in the
-   Python CLI, checkbox in the GUI. Bytes +13..+20 are reserved for the
-   background tile (`cfg_tile`), +21..+23 free.
-4. **50/60Hz + R800 session toggles (446ca09)** — machine detected once at boot
-   (BIOS 0x002D), status shown on the PAGE_ROW line ('5' toggles 50/60 on MSX2+,
-   '8' toggles R800 DRAM on turbo R). Applied in launch_game: R#9 bit1 + RG9SAV
-   mirror; CHGCPU 0x82 (before di, double-guarded). 50/60 verified in emulator
-   both ways (R9/RG9SAV byte dumps); **R800 verified working in openMSX
-   (FS-A1GT) but the user wants a REAL turbo R test before calling it done.**
-   Known v1 limitation: games that rewrite R#9 in their init override the
-   50/60 preset.
-5. **Echo Mode preserved through launch (446ca09)** — the trampoline used to
-   wipe CFGR's ECHO bit (PSG mirroring to the cart minijack, HOME at power-on).
-   Now read once after REGEN=1 (masking FPGA_WAIT bit 7) and carried through
-   both CFGR writes. Only ever preserved, never set (ECHO may not be
-   software-settable on real hardware — manual marks it "RC"). Not yet
-   verified in emulator.
-6. **Forensic gate recreated** — `.forja/gate.json` + `.forja/asm_check.py`
-   (gitignored, machine-local). Checks: 6× pasmo with exact-size asserts
-   (launcher uses a range — it grows), launcher-bin-sync (filecmp of the two
-   copies), py-compile ×8, pack-selftest (`yamanooto_pack.py test`),
-   cargo build + cargo test. If lost, recreate from this list; runner is the
-   forja plugin's `forensic-gate.py` (config keys: `name`/`command`/`is_test`).
+1. **SUBOFF / granularidad 8KB (d53722a + fix en 446ca09)** — juegos K4/plain
+   ≤16KB comparten unidad de 32KB (2×16KB o 4×8KB) en AMBOS builders.
+   Verificado con 24 Konami reales de 16KB (24 unidades → 12).
+   ⚠ Lección grabada: openMSX (y seguramente el hardware) **latchea
+   OFFR*4+SUBOFF al escribir cada registro de banco** — el trampolín escribe
+   CFGR=SUBOFF|ECHO ANTES de los bank writes (STEP 1). Si se toca ese orden,
+   los juegos sub-colocados arrancan el vecino del slot 0.
+2. **Jingle de arranque opcional (c71431b)** — YMNTCFG!+12, TOML/CLI/GUI.
+3. **Toggles runtime (446ca09)** — '5' = 50/60Hz (MSX2+, VDP R#9 bit1 +
+   espejo RG9SAV), '8' = R800 DRAM (solo turbo R, CHGCPU 0x82 antes del di).
+   Detección por BIOS 0x002D en el arranque; estado en la fila 22.
+   50/60 verificado (R9=2/0 según toggle); R800 verificado en emulador
+   (FS-A1GT) — **pendiente hardware real** para veredicto final.
+4. **Echo Mode preservado (446ca09)** — el trampolín ya no borra CFGR bit 1
+   (PSG mirroring al minijack, tecla HOME). Solo se preserva, nunca se
+   setea. *Sin verificar en emulador aún.*
+5. **Tile de fondo animado (2cd3eb2 + 7c86f23)** — 8×8 horneado build-time
+   (YMNTCFG!+13..20), 8 direcciones de scroll (+21), color (+22, 0=auto
+   caja). Flush variable por fila (mdr_nt): el tile llena todo lo negro a la
+   derecha de cada título. GUI: editor de píxeles con rejilla, dropdowns de
+   dirección/color, preview animado en tiempo real. Verificado por el usuario.
+6. **Metal Gear 1 salva a flash (976616f)** — cinta virtual sobre UN sector
+   de 64KB (banco relativo 0x18), contrato por CARRY, 20 calls TAP*
+   parcheados con validación byte a byte. **Verificado por el usuario**:
+   grabar en ascensor con items → VERIFY OK → quit limpio → recargar → todo.
+   ⚠ Semántica original del juego: la cinta guarda el ÚLTIMO CHECKPOINT
+   (ascensores), no el instante del save — no es un bug (docs/MG1_SAVES.md).
+   El dump local es una fan-translation (CRC 5F3BB2F1) con layout idéntico.
+7. **GUI parchea los Metal Gear al vuelo (1397c61)** — arrastras el MG1
+   (128KB) o MG2 (512KB) CRUDOS y la GUI los parchea (ports Rust con paridad
+   byte a byte demostrada contra los scripts Python vía
+   `cargo run --example mg_parity`). También acepta dumps ya parcheados
+   (detección por firma). *Pipeline GUI→imagen→save aún sin verificar en
+   emulador (pendiente de esta tarde).*
+8. **SCC sin desperdicio + modo secuencial (1397c61)** — veredicto de la
+   investigación: **el alineamiento 512KB NO es del hardware, es solo del
+   bug de openMSX 21.0** (fix rawBanks solo en master; última release
+   21.0 = sep 2025). Implementado:
+   - Las unidades-mirror donan sus 24KB libres a juegos ≤16KB (~336KB
+     recuperados con la colección completa). Automático en ambos modos.
+   - `--no-scc-align` / `[launcher].scc_align` / checkbox GUI (default ON):
+     OFF = empaquetado 100% secuencial — correcto en hardware real y openMSX
+     master; **la música SCC calla en openMSX 21.0** (documentado). Invertir
+     el default cuando salga la próxima release de openMSX.
+   - Detalles y fuentes en docs/SCC_ALIGNMENT.md (fecha 21.0 corregida).
+9. **Botón Build ROM** arriba a la derecha, doble tamaño (petición usuario).
 
-## Build & test recipe (updated sizes)
+## Build & recipe (referencia)
 
-Same as before (pasmo/python/cargo/openMSX 21). Current reference sizes:
-`launcher.bin` **5682**, `mg2_engine.bin` 181, `mg2_driver.bin` 8192,
-`gm2_part1.bin` 26, `gm2_part2.bin` 274, `sram_engine_gm2.bin` 530.
-ALWAYS size-check after pasmo (negative `ds` → empty bin, exit 0) and resync
-`gui-rs/data/launcher.bin` after touching launcher.asm (the gate enforces both).
+pasmo 0.5.4.beta2 · python 3.13 · cargo · openMSX 21.0. Tamaños de referencia:
+launcher.bin **6077** (¡crece con cada feature — el gate usa rango!),
+mg1_engine 144, mg1_driver 8192, mg1_shim 56, mg2_engine 181, mg2_driver 8192,
+gm2_part1 26, gm2_part2 274, sram_engine_gm2 530.
+SIEMPRE: size-check tras pasmo (ds negativo → bin vacío exit 0) y resync
+gui-rs/data/launcher.bin (el gate lo fuerza). Gate: `.forja/gate.json` +
+`.forja/asm_check.py` (gitignorados; recrear de esta lista si se pierden:
+pasmo×9 con tamaños, launcher-bin-sync, py-compile×9, pack-selftest,
+cargo build+test con is_test).
 
-### openMSX on this Windows box (learned the hard way)
-- **The user tests in openMSX; the assistant only launches** (no -script, no
-  key injection, no screenshots, never kill instances that may be the user's).
-- If openmsx dies instantly with exit 1 and NO output: system audio broke —
-  launch with `SDL_AUDIODRIVER=dummy` (no sound, but works).
-- `Panasonic_FS-A1ST` does not boot on this install (silent exit 1, testconfig
-  OK) — **use `Panasonic_FS-A1GT`** for turbo R testing.
-- file-hunter systemroms downloads need a browser User-Agent + referer (405
-  otherwise).
+### openMSX en esta máquina (aprendido a golpes)
+- **El usuario prueba; el asistente SOLO lanza** (sin -script, sin teclas,
+  sin capturas, sin matar instancias ajenas). Regla dura.
+- openmsx muere mudo exit 1 → `SDL_AUDIODRIVER=dummy` (audio del sistema
+  caído). No experimentar con otros drivers.
+- `Panasonic_FS-A1ST` no arranca en esta instalación → usar **FS-A1GT**.
+- Los dummies de test_image hacen DI/HALT a propósito: congelarse = éxito.
 
-## Also shipped later the same night (commits 2cd3eb2, 7c86f23, 976616f)
+## Pruebas de ESTA TARDE (pendientes del usuario)
 
-- **Background tile animation — DONE, user-verified.** 8x8 tile baked at
-  build time (YMNTCFG! +13..+20), scroll direction (+21, 8 compass dirs) and
-  colour (+22, 0 = box colour). Variable-width list flushes (per-row NT remap
-  via mdr_nt) let the tile fill everything right of each title. GUI has a
-  grid pixel editor, direction/colour dropdowns and a LIVE animated preview.
-  Shared pattern index 31 per third (NEVER 255 — flush_marq rewrites the full
-  marquee row every frame).
-- **Metal Gear 1 saves to flash — DONE, user-verified** (save at an elevator,
-  VERIFY OK, clean quit, reload, load OK). Virtual-tape driver over one 64KB
-  sector at relative bank 0x18; carry-based contract; patcher validates every
-  original byte before writing. Full design + checkpoint-semantics note in
-  `docs/MG1_SAVES.md`. Works on the local fan-translation dump (CRC 5F3BB2F1)
-  — its code layout matches the disasm reference.
+1. **Pipeline GUI completo con Metal Gears**: arrastrar MG1+MG2 crudos +
+   colección, Build ROM, y en openMSX: grabar partida MG1 (ascensor) y MG2
+   → quit limpio → recargar → cargar. (El asistente lanza; el usuario prueba.)
+2. **Música SCC con la imagen default (alineada)**: Salamander/Gradius 2
+   suenan + juegos de 16KB viviendo en unidades-mirror funcionan.
+3. (Opcional) Imagen `--no-scc-align` en openMSX master o hardware real.
+4. (Cuando haya cartucho a mano) R800 en turbo R real + el caso SCC/0x3F
+   sin alinear en hardware — las dos incógnitas abiertas.
 
-## What's next (in priority order)
+## Siguientes (sin fecha)
 
-- (obsolete section below kept for reference — T4 shipped, see above)
-- **★ T4 — background tile animation** (designed, not started). Full design:
-  - The menu uses SCREEN 2 as a bitmap (NT = 0..255×3), so there is no shared
-    tile: **remap background NT cells to ONE shared pattern index per third —
-    use index 31 in ALL three thirds** (pattern bytes at 0x00F8/0x08F8/0x10F8,
-    colour at 0x20F8/0x28F8/0x30F8 ← write `v_col_box` once).
-    Index-31-per-third is never flushed IF list-row flushes are restricted
-    (below). ⚠ Do NOT use 255 for third 2: `flush_marq` copies the FULL 256
-    bytes of row 23 every frame and would clobber pattern 255 (a plan earlier
-    tonight got this wrong — re-derive collision analysis if changing indices).
-  - Add `flush_row_pat_n`/`set_row_color_n` variants (bc=176 = cells 0..21)
-    used ONLY by `menu_draw_row` (titles end < 147px, safe). Title row, status
-    row (22) and marquee (23) keep full-row flushes — do NOT remap row 22's
-    right strip ("PAG x/y" renders in cells ~25-31).
-  - `bg_remap` (call at end of `menu_init`): rows 0/2 outside box_lc..box_rc,
-    cols 22..31 of rows 3..21, cols 30..31 of row 23 → all to index 31; then
-    the three 8-byte colour fills. One-time cost, NT is never rewritten after.
-  - `anim_tick` (call from main_loop after `scroll_tick`): every ANIM_RATE=8
-    frames, phase=(phase+1)&7; visible row r = cfg_tile[(r+phase)&7] rotated
-    right by phase → 45° diagonal scroll; write the 8 rotated bytes to the 3
-    shared pattern addresses (LDIRVM ×3). With cfg_tile all-0 (default) the
-    screen is byte-identical to today.
-  - GUI: `apply_tile` (anchor +13..+20, clone of apply_music_flag), 8×8 pixel
-    editor in egui next to the colour pickers, `tile: [u8;8]` through
-    build_image. Python CLI stays neutral (default zeros).
-  - Verify: user's eyes (tile scrolling diagonally in margins; menu/hilite/
-    marquee/status intact; with no tile configured, identical to today).
-- **T5 — MG1 skeletons**: `launcher/mg1_driver.asm` (8192B exact, carry
-  contract, stubs scf/ret) + `packager/mg1_to_yamanooto.py` (CRC32 E85C5731,
-  PATCHES from the verified table) + `MAPPER_MG1` (footprint_units=8, even
-  OFFR). **The complete verified design (20 intercept offsets, RAM map,
-  virtual-tape semantics, flash layout, unknowns) is in `docs/MG1_SAVES.md`.**
-- R800 on real turbo R hardware (user's call — emulator says OK).
-- Echo preserve verification (inject ECHO by debug in openMSX, launch, read
-  CFGR — openMSX allows software-set; hardware may not).
-- Backlog (from the user, unscheduled): GM2 migration to the per-game RMW
-  model, ASCII8-SRAM (Xanadu) / ASCII16-SRAM2 (Hydlide), full MG2 3-slot test.
+- Migrar GM2 al modelo per-game 64KB RMW; ASCII8-SRAM (Xanadu) /
+  ASCII16-SRAM2 (Hydlide).
+- Verificar ECHO preserve en emulador; test MG2 3 slots sin contaminación.
+- Invertir default de scc_align cuando salga openMSX > 21.0.
+- Release (tag `v*` — es lo ÚNICO que dispara el workflow de release).
+- Actualizar README (features nuevas: toggles, tile, MG1, scc_align, MG en GUI).
 
-## Load-bearing gotchas (unchanged + new)
+## Gotchas vigentes (los que muerden)
 
-- Two launcher.bin copies must stay in sync (gate check makes it mechanical).
-- Per-game save sectors don't need OFFR juggling (relative to the game).
-- SUBOFF must be IN CFGR before the bank writes (this session's bug).
-- Dummy games in test images DI/HALT by design — a frozen screen after
-  launching one is success, not a hang.
-- The directory sorts alphabetically; physical placement order is by size
-  descending within each pass — don't infer flash position from menu position.
+- SUBOFF debe estar en CFGR ANTES de los bank writes (trampolín STEP 1).
+- El mirror SCC vive en el banco 3 de la unidad OFFR+15 — el packer lo
+  siembra en `subunits`; no tocar sin actualizar los selftests gemelos.
+- Dos copias de launcher.bin (launcher/ y gui-rs/data/) + tres .bin de MG1
+  y uno de MG2 embebidos por include_bytes! en la GUI → recompilar gui-rs
+  tras tocar cualquier .asm.
+- La colocación física NO sigue el orden del menú (alfabético) ni el de
+  entrada (por tamaño y pasadas). No inferir posiciones sin el selftest.
+- mg1/mg2 en la GUI validan la firma del dump antes de parchear — un dump
+  distinto se rechaza en rojo, nunca se parchea a ciegas.
