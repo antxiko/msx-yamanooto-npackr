@@ -67,8 +67,25 @@ ALWAYS size-check after pasmo (negative `ds` → empty bin, exit 0) and resync
 - file-hunter systemroms downloads need a browser User-Agent + referer (405
   otherwise).
 
+## Also shipped later the same night (commits 2cd3eb2, 7c86f23, 976616f)
+
+- **Background tile animation — DONE, user-verified.** 8x8 tile baked at
+  build time (YMNTCFG! +13..+20), scroll direction (+21, 8 compass dirs) and
+  colour (+22, 0 = box colour). Variable-width list flushes (per-row NT remap
+  via mdr_nt) let the tile fill everything right of each title. GUI has a
+  grid pixel editor, direction/colour dropdowns and a LIVE animated preview.
+  Shared pattern index 31 per third (NEVER 255 — flush_marq rewrites the full
+  marquee row every frame).
+- **Metal Gear 1 saves to flash — DONE, user-verified** (save at an elevator,
+  VERIFY OK, clean quit, reload, load OK). Virtual-tape driver over one 64KB
+  sector at relative bank 0x18; carry-based contract; patcher validates every
+  original byte before writing. Full design + checkpoint-semantics note in
+  `docs/MG1_SAVES.md`. Works on the local fan-translation dump (CRC 5F3BB2F1)
+  — its code layout matches the disasm reference.
+
 ## What's next (in priority order)
 
+- (obsolete section below kept for reference — T4 shipped, see above)
 - **★ T4 — background tile animation** (designed, not started). Full design:
   - The menu uses SCREEN 2 as a bitmap (NT = 0..255×3), so there is no shared
     tile: **remap background NT cells to ONE shared pattern index per third —

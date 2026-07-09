@@ -1,5 +1,18 @@
 # Metal Gear 1 (RC750) — cassette saves → Yamanooto flash: design study
 
+> **STATUS: IMPLEMENTED AND USER-VERIFIED (2026-07-05).** Save at an elevator
+> with items in hand → VERIFY OK → clean quit → relaunch → load → all back.
+> Implementation: `launcher/mg1_engine.asm` + `launcher/mg1_driver.asm` +
+> `launcher/mg1_shim.asm` + `packager/mg1_to_yamanooto.py` + `MAPPER_MG1`.
+>
+> **Checkpoint semantics (original game behaviour, NOT a driver bug):** the
+> tape save writes `GameProgressBuffer`, which is a CHECKPOINT SNAPSHOT that
+> `StoreGameStat` (logic/checkpoints.asm, driven by `ChkSaveGameStatus` at
+> Banks0123.asm:8661/:11867 against a room list) refreshes only in checkpoint
+> rooms — the elevators. Saving right after picking items WITHOUT passing a
+> checkpoint loses them on load, exactly like a real cassette. `RestoreGameStat`
+> (Banks0123.asm:11820) applies the snapshot after load.
+
 > Study produced 2026-07-05 from the annotated disassembly
 > [GuillianSeed/MetalGear](https://github.com/GuillianSeed/MetalGear) (Manuel Pazos, 2017).
 > **Every ROM offset below was verified by assembling the disasm with Sjasm 0.39j and
