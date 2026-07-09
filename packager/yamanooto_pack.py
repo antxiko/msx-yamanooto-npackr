@@ -487,6 +487,28 @@ def _align_up(value: int, align: int) -> int:
     return (value + align - 1) // align * align
 
 
+def _sub_slots_needed(g):
+    """8KB sub-placement eligibility (CFGR SUBOFF, bits 4-5).
+
+    Returns how many 8KB slots the game needs inside a shared 32KB OFFR unit
+    (1 for <=8KB, 2 for <=16KB), or None if it must keep taking whole OFFR
+    units (SCC/ASCII16/MG2 need 16-OFFR alignment + wrap mirror + the 0x3F
+    trick; SRAM games reserve save sectors; footprint overrides reserve extra
+    flash). openMSX resolves banks as (value + OFFR*4 + suboff) & 0x3FF, so a
+    game at suboff=2 with mirrored banks never touches its neighbour's banks.
+    """
+    if g.mapper not in (MAPPER_K4, MAPPER_PLAIN):
+        return None
+    if g.footprint_units or g.sram_type is not None or g.needs_wrap_mirror:
+        return None
+    size = len(g.data)
+    if size <= BANK_SIZE:
+        return 1
+    if size <= 2 * BANK_SIZE:
+        return 2
+    return None
+
+
 def pack_games(games, *, skip_overflow=False):
     """Assign OFFR positions efficiently.
 
@@ -589,8 +611,52 @@ def pack_games(games, *, skip_overflow=False):
 
     # Second pass: non-SCC games (K4/plain) in any free OFFR slot.
     # Sort by size descending so big K4 games (512K Shalom!) get placed first.
+    # Small games (<=16KB) are sub-placed at 8KB granularity inside a shared
+    # 32KB unit via CFGR SUBOFF: one unit holds 2x16KB or 4x8KB games.
+    # subunits tracks the free 8KB slots of every opened shared unit.
     non_scc.sort(key=lambda g: -len(g.data))
+    subunits = {}   # offr -> [bool]*4, True = 8KB slot used
     for g in non_scc:
+        sub_n = _sub_slots_needed(g)
+        if sub_n is not None:
+            slot = None
+            # Try already-opened units first. sorted() keeps this deterministic
+            # (parity with the Rust port's BTreeMap iteration order).
+            for offr in sorted(subunits):
+                bmp = subunits[offr]
+                for s in ((0, 2) if sub_n == 2 else (0, 1, 2, 3)):
+                    if all(not bmp[i] for i in range(s, s + sub_n)):
+                        slot = (offr, s)
+                        break
+                if slot:
+                    break
+            if slot is None:
+                # Open a new shared unit at the first free OFFR.
+                for start in range(n_slots):
+                    if not occupied[start]:
+                        occupied[start] = True
+                        subunits[start] = [False] * 4
+                        slot = (start, 0)
+                        break
+            if slot is not None:
+                offr, s = slot
+                for i in range(s, s + sub_n):
+                    subunits[offr][i] = True
+                g.offr = offr
+                g.suboff = s << 4          # CFGR bits 4-5; entry[25]-ready
+                g.flash_offset = (offr * 4 + s) * BANK_SIZE
+                # A sub-placed game must never map banks beyond its own slots:
+                # give small K4 games the same mirrored pattern PLAIN already
+                # gets in __init__ (with banks (0,1,2,3) a suboff=0 game would
+                # read its neighbour's 8KB banks through windows 2-3).
+                if g.mapper == MAPPER_K4:
+                    g.banks = (0, 0, 0, 0) if sub_n == 1 else (0, 1, 0, 1)
+                placed.append(g)
+                continue
+            if skip_overflow:
+                dropped.append(g)
+                continue
+            raise RuntimeError(f"Out of flash placing {g.title!r}")
         size_offr = max(1, (len(g.data) + OFFR_UNIT - 1) // OFFR_UNIT)
         placed_here = False
         for start in range(n_slots - size_offr + 1):
@@ -760,41 +826,67 @@ def cmd_build(args):
     print(f"Wrote {args.output} ({len(image)} bytes)")
     print(f"  Launcher: {len(launcher_data)} bytes at 0x000000")
     for g in games:
-        print(f"  [{g.mapper:5s}] OFFR=0x{g.offr:02X} ({g.offr*32:4d}K)  "
+        print(f"  [{g.mapper:5s}] OFFR=0x{g.offr:02X} ({g.offr*32:4d}K)  SUB=0x{g.suboff:02X}  "
               f"banks={g.banks}  flags=0x{g.flags:02X}  size={len(g.data):>7} {g.title}")
 
 
 def cmd_test(args):
-    """Build a minimal test image: launcher + 3 dummy game entries.
-    Dummy games have a stub 'AB' header that just RST 0 (returns to launcher
-    on the next reset)."""
+    """Build a minimal test image (launcher + dummy games) AND self-test the
+    packer: asserts the SUBOFF sub-placement against hand-computed positions.
+    Dummy games have a stub 'AB' header that just DI+HALTs."""
     here = Path(__file__).resolve().parent.parent
     launcher_data = (here / "launcher" / "launcher.bin").read_bytes()
 
-    # Build a tiny dummy game: 32-byte ROM, header AB + INIT at 0x4010 = RST 0
-    def make_dummy_game(name_bytes):
-        rom = bytearray(0x8000)              # 32 KB
+    # Build a tiny dummy game: AB header + INIT at 0x4010 = DI / HALT
+    def make_dummy_game(size=0x8000):
+        rom = bytearray(size)
         rom[0]   = ord('A')
         rom[1]   = ord('B')
         rom[2:4] = (0x4010).to_bytes(2, 'little')   # INIT
-        # at 0x4010 (offset 0x10 within ROM): print a message + halt
         rom[0x10] = 0xF3                     # DI
         rom[0x11] = 0x76                     # HALT (just freeze; user resets)
-        return bytes(rom[:32]) + b"\x00" * (0x8000 - 32)
+        return bytes(rom)
 
+    g16a = Game("TEST 16K A", make_dummy_game(16 * 1024), MAPPER_PLAIN)
+    g16b = Game("TEST 16K B", make_dummy_game(16 * 1024), MAPPER_PLAIN)
+    g16c = Game("TEST 16K C", make_dummy_game(16 * 1024), MAPPER_PLAIN)
+    g8d  = Game("TEST 8K D",  make_dummy_game(8 * 1024),  MAPPER_PLAIN)
     games = [
-        Game("TEST GAME 1 (SCC)",   make_dummy_game(b"G1"), MAPPER_SCC),
-        Game("TEST GAME 2 (K4)",    make_dummy_game(b"G2"), MAPPER_K4),
-        Game("TEST 16K MIRRORED",   bytes([0xC9]) + bytes(16*1024 - 1), MAPPER_PLAIN),
+        Game("TEST GAME 1 (SCC)", make_dummy_game(), MAPPER_SCC),
+        Game("TEST GAME 2 (K4)",  make_dummy_game(), MAPPER_K4),
+        g16a, g16b, g16c, g8d,
     ]
 
-    image = build_image(launcher_data, games)
+    image, dropped = build_image(launcher_data, games)
+    assert not dropped, f"dropped in self-test: {[g.title for g in dropped]}"
+
+    # --- SUBOFF self-test (hand-computed; pool starts at OFFR 4) ------------
+    # SCC dummy -> 16-aligned slot 16; K4 32KB dummy -> first free OFFR 4.
+    # 16K A opens shared unit 5 (suboff 0), 16K B fills its upper half
+    # (suboff 0x20), 16K C opens unit 6, 8K D takes unit 6 slot 2 (0x20).
+    expected = {
+        "TEST 16K A": (5, 0x00), "TEST 16K B": (5, 0x20),
+        "TEST 16K C": (6, 0x00), "TEST 8K D":  (6, 0x20),
+    }
+    for g in (g16a, g16b, g16c, g8d):
+        want = expected[g.title]
+        got = (g.offr, g.suboff)
+        assert got == want, f"{g.title}: placed at {got}, expected {want}"
+        # The game data must live at the suboff-shifted flash offset...
+        base = (g.offr * 4 + (g.suboff >> 4)) * BANK_SIZE
+        assert g.flash_offset == base, (g.title, g.flash_offset, base)
+        # ...and the image must actually contain its AB header there.
+        assert image[base:base + 2] == b"AB", f"{g.title}: no AB at 0x{base:06X}"
+    # 16KB sub-placed PLAIN keeps mirrored banks (never maps the neighbour).
+    assert g16a.banks == (0, 1, 0, 1) and g8d.banks == (0, 0, 0, 0)
+    print("SUBOFF self-test: 4/4 placements OK")
+
     out = here / "test_image.rom"
     out.write_bytes(image)
     print(f"Wrote {out} ({len(image)} bytes)")
     for g in games:
-        print(f"  [{g.mapper:5s}] OFFR=0x{g.offr:02X}  banks={g.banks}  "
-              f"flags=0x{g.flags:02X}  {g.title}")
+        print(f"  [{g.mapper:5s}] OFFR=0x{g.offr:02X}  SUB=0x{g.suboff:02X}  "
+              f"banks={g.banks}  flags=0x{g.flags:02X}  {g.title}")
     print()
     print("Run in openMSX:")
     print(f"  openmsx -cart {out} -romtype Yamanooto")

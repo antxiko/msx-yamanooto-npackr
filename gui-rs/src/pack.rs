@@ -5,6 +5,7 @@
 //   - SCC patcher (force-mirror fallback active)
 
 use crate::mapper::MapperKind;
+use std::collections::BTreeMap;
 
 pub const BANK_SIZE: usize = 8 * 1024;
 pub const OFFR_UNIT: usize = 32 * 1024;
@@ -63,6 +64,7 @@ pub struct Game {
     pub size_blocks_32k: u8,
     // Filled by pack_games:
     pub offr: u8,
+    pub suboff: u8,      // CFGR bits 4-5: 8KB offset inside the 32KB OFFR unit
     pub flash_offset: usize,
 }
 
@@ -100,7 +102,7 @@ impl Game {
         let size_blocks_32k = (((data.len() + OFFR_UNIT - 1) / OFFR_UNIT).min(255)) as u8;
         Ok(Self {
             title, data, mapper, flags, banks, needs_wrap_mirror, size_blocks_32k,
-            offr: 0, flash_offset: 0,
+            offr: 0, suboff: 0, flash_offset: 0,
         })
     }
 
@@ -110,6 +112,21 @@ impl Game {
 }
 
 fn align_up(v: usize, a: usize) -> usize { ((v + a - 1) / a) * a }
+
+/// 8KB sub-placement eligibility (CFGR SUBOFF, bits 4-5). Mirrors
+/// yamanooto_pack.py::_sub_slots_needed: how many 8KB slots the game needs
+/// inside a shared 32KB OFFR unit (1 for <=8KB, 2 for <=16KB), or None if it
+/// must keep taking whole OFFR units. SCC/ASCII16 are excluded (16-OFFR
+/// alignment + wrap mirror + the 0x3F trick); openMSX resolves banks as
+/// (value + OFFR*4 + suboff) & 0x3FF.
+fn sub_slots_needed(g: &Game) -> Option<usize> {
+    if !matches!(g.mapper, MapperKind::K4 | MapperKind::Plain) { return None; }
+    if g.needs_wrap_mirror { return None; }
+    let size = g.data.len();
+    if size <= BANK_SIZE { Some(1) }
+    else if size <= 2 * BANK_SIZE { Some(2) }
+    else { None }
+}
 
 pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize) -> Result<Vec<Game>, String> {
     let n_slots = flash.max_offr();
@@ -156,8 +173,52 @@ pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize) -> Result<Vec<Game>, 
         }
     }
 
-    // Non-SCC: any free slot
+    // Non-SCC: any free slot. Small (<=16KB) K4/plain games are sub-placed at
+    // 8KB granularity inside a shared 32KB unit via CFGR SUBOFF: one unit
+    // holds 2x16KB or 4x8KB games. subunits tracks each opened unit's free
+    // 8KB slots; BTreeMap iteration order matches Python's sorted() (parity).
+    let mut subunits: BTreeMap<usize, [bool; 4]> = BTreeMap::new();
     for g in non_scc {
+        if let Some(sub_n) = sub_slots_needed(&g) {
+            let mut slot: Option<(usize, usize)> = None;
+            'search: for (&offr, bmp) in subunits.iter() {
+                let candidates: &[usize] = if sub_n == 2 { &[0, 2] } else { &[0, 1, 2, 3] };
+                for &s in candidates {
+                    if bmp[s..s + sub_n].iter().all(|&used| !used) {
+                        slot = Some((offr, s));
+                        break 'search;
+                    }
+                }
+            }
+            if slot.is_none() {
+                // Open a new shared unit at the first free OFFR.
+                for start in 0..n_slots {
+                    if !occupied[start] {
+                        occupied[start] = true;
+                        subunits.insert(start, [false; 4]);
+                        slot = Some((start, 0));
+                        break;
+                    }
+                }
+            }
+            if let Some((offr, s)) = slot {
+                let bmp = subunits.get_mut(&offr).unwrap();
+                for i in s..s + sub_n { bmp[i] = true; }
+                let mut g = g;
+                g.offr = offr as u8;
+                g.suboff = (s as u8) << 4;              // CFGR bits 4-5
+                g.flash_offset = (offr * 4 + s) * BANK_SIZE;
+                // A sub-placed game must never map banks beyond its own slots:
+                // give small K4 games the mirrored pattern Plain already gets.
+                if matches!(g.mapper, MapperKind::K4) {
+                    g.banks = if sub_n == 1 { [0, 0, 0, 0] } else { [0, 1, 0, 1] };
+                }
+                placed.push(g);
+            } else {
+                dropped.push(g);
+            }
+            continue;
+        }
         let size_offr = g.size_offr().max(1);
         let mut slot: Option<Game> = Some(g);
         for start in 0..=n_slots.saturating_sub(size_offr) {
@@ -194,7 +255,7 @@ pub fn build_directory(games: &[Game]) -> Result<Vec<u8>, String> {
         entry[..n].copy_from_slice(&bytes[..n]);
         // 23..24 stays NUL
         entry[24] = g.offr;
-        entry[25] = 0;                          // SUBOFF (always 0 in this port)
+        entry[25] = g.suboff & 0x30;            // DIR_SUBOFF (bits 4-5)
         entry[26] = g.flags;
         entry[27] = g.size_blocks_32k;
         entry[28..32].copy_from_slice(&g.banks);
@@ -339,7 +400,56 @@ mod title_tests {
         assert_eq!(image[cfg + CFG_COL_TEXT_OFF], 7);
         assert_eq!(image[cfg + CFG_COL_BG_OFF], 4);
         assert_eq!(image[cfg + CFG_COL_BOX_OFF], 11);
-        std::fs::write("/tmp/rust_gui.rom", &image).expect("write /tmp/rust_gui.rom");
+        let out = std::env::temp_dir().join("rust_gui.rom");
+        std::fs::write(&out, &image).expect("write rust_gui.rom to temp dir");
+    }
+
+    // Twin of `yamanooto_pack.py test` (cmd_test): same synthetic game set,
+    // same hand-computed expected placements. If both suites pass, the
+    // Python and Rust SUBOFF sub-placement is identical by construction.
+    #[test]
+    fn suboff_parity_with_python() {
+        fn dummy(size: usize) -> Vec<u8> {
+            let mut rom = vec![0u8; size];
+            rom[0] = b'A'; rom[1] = b'B';
+            rom[2] = 0x10; rom[3] = 0x40;        // INIT 0x4010
+            rom
+        }
+        let mut games = vec![
+            Game::new("TEST GAME 1 (SCC)".into(), dummy(0x8000), MapperKind::Scc).unwrap(),
+            Game::new("TEST GAME 2 (K4)".into(),  dummy(0x8000), MapperKind::K4).unwrap(),
+            Game::new("TEST 16K A".into(), dummy(16 * 1024), MapperKind::Plain).unwrap(),
+            Game::new("TEST 16K B".into(), dummy(16 * 1024), MapperKind::Plain).unwrap(),
+            Game::new("TEST 16K C".into(), dummy(16 * 1024), MapperKind::Plain).unwrap(),
+            Game::new("TEST 8K D".into(),  dummy(8 * 1024),  MapperKind::Plain).unwrap(),
+        ];
+        let dropped = pack_games(&mut games, FlashSize::Mb8).unwrap();
+        assert!(dropped.is_empty());
+        let find = |t: &str| games.iter().find(|g| g.title == t).unwrap();
+        // Hand-computed (pool starts at OFFR 4): SCC -> 16-aligned slot 16;
+        // K4 32KB -> OFFR 4; 16K A opens shared unit 5, 16K B fills its upper
+        // half, 16K C opens unit 6, 8K D takes unit 6 slot 2.
+        for (title, offr, suboff) in [
+            ("TEST 16K A", 5u8, 0x00u8), ("TEST 16K B", 5, 0x20),
+            ("TEST 16K C", 6, 0x00),     ("TEST 8K D",  6, 0x20),
+        ] {
+            let g = find(title);
+            assert_eq!((g.offr, g.suboff), (offr, suboff), "{title}");
+            let base = (g.offr as usize * 4 + (g.suboff >> 4) as usize) * BANK_SIZE;
+            assert_eq!(g.flash_offset, base, "{title}");
+        }
+        assert_eq!(find("TEST GAME 2 (K4)").offr, 4);
+        assert_eq!(find("TEST GAME 1 (SCC)").offr, 16);
+        // Sub-placed games keep/get mirrored banks (never map the neighbour).
+        assert_eq!(find("TEST 16K A").banks, [0, 1, 0, 1]);
+        assert_eq!(find("TEST 8K D").banks, [0, 0, 0, 0]);
+        // The directory encodes suboff at entry byte 25.
+        let mut sorted = games.clone();
+        sorted.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        let dir = build_directory(&sorted).unwrap();
+        let idx = sorted.iter().position(|g| g.title == "TEST 16K B").unwrap();
+        let entry = &dir[DIR_HDR_SIZE + idx * DIR_ENTRY_SIZE..];
+        assert_eq!(entry[25], 0x20, "dir entry SUBOFF byte");
     }
 
     #[test]
