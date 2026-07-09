@@ -751,7 +751,47 @@ fn strip_known_tags(name: &str) -> String {
     stem[..cut].trim().to_string()
 }
 
+// Startup log next to the exe. With windows_subsystem = "windows" there is no
+// console, so an eframe startup failure (no usable GPU backend, driver issues)
+// would otherwise die without a trace; this file is the only diagnostic
+// channel a user can send back.
+fn log_file_path() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            return parent.join("yamanooto-gui.log");
+        }
+    }
+    std::path::PathBuf::from("yamanooto-gui.log")
+}
+
+fn log_line(msg: &str) {
+    use std::io::Write as _;
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _g = LOCK.get_or_init(|| std::sync::Mutex::new(())).lock();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file_path())
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_line(&format!("PANIC: {info}"));
+        default(info);
+    }));
+}
+
 fn main() -> Result<(), eframe::Error> {
+    install_panic_hook();
+    log_line(&format!("=== yamanooto-gui {} startup ===", env!("CARGO_PKG_VERSION")));
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([760.0, 640.0])
@@ -759,11 +799,17 @@ fn main() -> Result<(), eframe::Error> {
             .with_title("MSX Yamanooto nPackR"),
         ..Default::default()
     };
-    eframe::run_native(
+    log_line("calling eframe::run_native (wgpu backend)");
+    let result = eframe::run_native(
         "yamanooto-gui",
         opts,
         Box::new(|_cc| Ok(Box::<App>::default())),
-    )
+    );
+    match &result {
+        Ok(()) => log_line("eframe::run_native returned Ok"),
+        Err(e) => log_line(&format!("eframe::run_native returned Err: {e}")),
+    }
+    result
 }
 
 #[cfg(test)]
