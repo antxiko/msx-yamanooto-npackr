@@ -1,130 +1,117 @@
-# Development handoff — SRAM saves (per-game 64KB, read-modify-write)
+# Development handoff — night session results + what's next
 
-> Continuation notes for picking the work up on another machine (incl. Windows 11).
-> Snapshot: 2026-07-04, at commit `9e04a80` on `main`.
+> Continuation notes. Snapshot: 2026-07-05, after the Windows night session
+> (commits `d53722a`, `c71431b`, `446ca09` on `main`). Previous handoff topic
+> (SRAM saves / MG2) is DONE and shipped earlier; this session delivered the
+> CFGR SUBOFF packing plus launcher features.
 
-## Where we are
+## What shipped this session (all verified, see commit messages for evidence)
 
-Goal of this line of work: **emulate cartridge SRAM saves on the Yamanooto flash**
-(it has no battery SRAM; its AMD flash is writable at runtime via the ENAR `WREN` bit).
+1. **SUBOFF packing (d53722a)** — small K4/plain games (≤16KB) now share a 32KB
+   OFFR unit at 8KB granularity via CFGR SUBOFF (bits 4-5), in **both builders**
+   (`yamanooto_pack.py` AND `gui-rs/src/pack.rs`, algorithm mirrored 1:1, twin
+   parity tests). 24 real 16KB Konami carts → 12 units (384KB reclaimed).
+   `cmd_test` was broken (tuple unpack TypeError) — fixed and turned into a real
+   self-test with hand-computed placement asserts. Rust test no longer writes to
+   /tmp (Windows).
+2. **⚠ THE OLD HANDOFF WAS WRONG about "launch side already wired, packer-only
+   change".** The trampoline wrote the bank registers BEFORE setting SUBOFF in
+   CFGR, and openMSX 21.0 (`Yamanooto.cc:242`) — and per its hardware notes most
+   likely the real cart too — **latches OFFR*4+SUBOFF at bank-write time**. Every
+   sub-placed game booted its unit's slot-0 neighbour (user asked for Athletic
+   Land, got Antarctic Adventure; confirmed with signature-marked dummies).
+   Fixed in `446ca09`: trampoline STEP 1 now writes CFGR = SUBOFF|ECHO (K4/MDIS
+   still 0) before priming banks. **Re-verify on real hardware** — if the real
+   cart resolves banks dynamically instead of latching, the fix is still
+   harmless.
+3. **Boot jingle build-time flag (c71431b)** — `YMNTCFG!` block byte +12
+   (`cfg_music_enable`), `[launcher] boot_music` / `--no-boot-music` in the
+   Python CLI, checkbox in the GUI. Bytes +13..+20 are reserved for the
+   background tile (`cfg_tile`), +21..+23 free.
+4. **50/60Hz + R800 session toggles (446ca09)** — machine detected once at boot
+   (BIOS 0x002D), status shown on the PAGE_ROW line ('5' toggles 50/60 on MSX2+,
+   '8' toggles R800 DRAM on turbo R). Applied in launch_game: R#9 bit1 + RG9SAV
+   mirror; CHGCPU 0x82 (before di, double-guarded). 50/60 verified in emulator
+   both ways (R9/RG9SAV byte dumps); **R800 verified working in openMSX
+   (FS-A1GT) but the user wants a REAL turbo R test before calling it done.**
+   Known v1 limitation: games that rewrite R#9 in their init override the
+   50/60 preset.
+5. **Echo Mode preserved through launch (446ca09)** — the trampoline used to
+   wipe CFGR's ECHO bit (PSG mirroring to the cart minijack, HOME at power-on).
+   Now read once after REGEN=1 (masking FPGA_WAIT bit 7) and carried through
+   both CFGR writes. Only ever preserved, never set (ECHO may not be
+   software-settable on real hardware — manual marks it "RC"). Not yet
+   verified in emulator.
+6. **Forensic gate recreated** — `.forja/gate.json` + `.forja/asm_check.py`
+   (gitignored, machine-local). Checks: 6× pasmo with exact-size asserts
+   (launcher uses a range — it grows), launcher-bin-sync (filecmp of the two
+   copies), py-compile ×8, pack-selftest (`yamanooto_pack.py test`),
+   cargo build + cargo test. If lost, recreate from this list; runner is the
+   forja plugin's `forensic-gate.py` (config keys: `name`/`command`/`is_test`).
 
-Verified & pushed:
-- **Metal Gear 2 (MG2)** saves to flash — DONE, verified in openMSX (save + clean-quit
-  persistence + reload load; flash byte-checked).
-- Game Master 2 (GM2) saves — DONE earlier (bespoke driver, its own scheme). Not yet on
-  the new per-game model below.
+## Build & test recipe (updated sizes)
 
-### The save architecture (decided 2026-07-03)
+Same as before (pasmo/python/cargo/openMSX 21). Current reference sizes:
+`launcher.bin` **5682**, `mg2_engine.bin` 181, `mg2_driver.bin` 8192,
+`gm2_part1.bin` 26, `gm2_part2.bin` 274, `sram_engine_gm2.bin` 530.
+ALWAYS size-check after pasmo (negative `ds` → empty bin, exit 0) and resync
+`gui-rs/data/launcher.bin` after touching launcher.asm (the gate enforces both).
 
-**One 64KB flash sector per SRAM game, updated read-modify-write. No accumulation.**
-- Flash can only flip 1→0; to change a byte you must erase, and erase clears a whole 64KB
-  sector. So you **cannot overwrite in place**. The model is: read the game's few save
-  bytes into RAM, **erase the 64KB sector, rewrite** them. Always the current save set,
-  never a growing log — the sector never "fills", so there is no compaction/GC.
-- Per-game (not a shared pool) because MSX RAM is tiny (the launcher has ~8KB free): a
-  game only ever handles **its own** small save set, which always fits in RAM. Each game's
-  sector is **relative to its own ROM** (reached with the game's own OFFR — no OFFR change,
-  no cross-game index, no `game_id`).
+### openMSX on this Windows box (learned the hard way)
+- **The user tests in openMSX; the assistant only launches** (no -script, no
+  key injection, no screenshots, never kill instances that may be the user's).
+- If openmsx dies instantly with exit 1 and NO output: system audio broke —
+  launch with `SDL_AUDIODRIVER=dummy` (no sound, but works).
+- `Panasonic_FS-A1ST` does not boot on this install (silent exit 1, testconfig
+  OK) — **use `Panasonic_FS-A1GT`** for turbo R testing.
+- file-hunter systemroms downloads need a browser User-Agent + referer (405
+  otherwise).
 
-### MG2 specifics (the reference implementation)
-- MG2 has exactly 3 save files: SNAK1/2/3. They live in ONE 64KB sector at relative bank
-  `0x48`, at fixed window offsets: slot `i` at `0xA000 + i*0x100`.
-  Record = `[marker 0xA5 | len(2, LE) | data(len)]`; `marker != 0xA5` = empty slot.
-- `packager/yamanooto_pack.py`: MG2 `footprint_units = 20` (640KB = 512KB ROM + 8KB driver
-  at rel bank 0x40 + one 64KB save sector at 0x48). Was 24 (3×64KB). Placed 16-OFFR-aligned
-  (keeps the sector 64KB-aligned in absolute flash).
-- `launcher/mg2_driver.asm` (org 0x8000, one 8KB bank, appended to the MG2 ROM as rel bank
-  0x40): `fn_read` reads slot by offset; `fn_write` does RMW — stages the 3 records in RAM
-  (STAGE=0xE5D0), the changed one from MG2's buffer (0xC700), the other two read back from
-  flash, then calls the engine. Every function returns **A=0** (MG2 judges success only by A).
-- `launcher/mg2_engine.asm` (org 0xE500, runs from RAM because flash is unreadable during
-  erase/program): map bank 0x48 → WREN on → erase sector → reprogram the 3 staged records
-  → WREN off. 181 bytes.
-- RAM map (all inside MG2-free RAM 0xE500–0xE749, found by a RAM dump): engine 0xE500 (181B),
-  driver scratch 0xE5C0, STAGE 0xE5D0 (3×118B).
-- MG2 ROM patch: `packager/mg2_to_yamanooto.py` (validates the GoodMSX RC-767 512KB dump,
-  patches GM2-detection + the inter-slot call helper, appends `launcher/mg2_driver.bin`).
+## What's next (in priority order)
 
-## Build & test recipe (cross-platform)
+- **★ T4 — background tile animation** (designed, not started). Full design:
+  - The menu uses SCREEN 2 as a bitmap (NT = 0..255×3), so there is no shared
+    tile: **remap background NT cells to ONE shared pattern index per third —
+    use index 31 in ALL three thirds** (pattern bytes at 0x00F8/0x08F8/0x10F8,
+    colour at 0x20F8/0x28F8/0x30F8 ← write `v_col_box` once).
+    Index-31-per-third is never flushed IF list-row flushes are restricted
+    (below). ⚠ Do NOT use 255 for third 2: `flush_marq` copies the FULL 256
+    bytes of row 23 every frame and would clobber pattern 255 (a plan earlier
+    tonight got this wrong — re-derive collision analysis if changing indices).
+  - Add `flush_row_pat_n`/`set_row_color_n` variants (bc=176 = cells 0..21)
+    used ONLY by `menu_draw_row` (titles end < 147px, safe). Title row, status
+    row (22) and marquee (23) keep full-row flushes — do NOT remap row 22's
+    right strip ("PAG x/y" renders in cells ~25-31).
+  - `bg_remap` (call at end of `menu_init`): rows 0/2 outside box_lc..box_rc,
+    cols 22..31 of rows 3..21, cols 30..31 of row 23 → all to index 31; then
+    the three 8-byte colour fills. One-time cost, NT is never rewritten after.
+  - `anim_tick` (call from main_loop after `scroll_tick`): every ANIM_RATE=8
+    frames, phase=(phase+1)&7; visible row r = cfg_tile[(r+phase)&7] rotated
+    right by phase → 45° diagonal scroll; write the 8 rotated bytes to the 3
+    shared pattern addresses (LDIRVM ×3). With cfg_tile all-0 (default) the
+    screen is byte-identical to today.
+  - GUI: `apply_tile` (anchor +13..+20, clone of apply_music_flag), 8×8 pixel
+    editor in egui next to the colour pickers, `tile: [u8;8]` through
+    build_image. Python CLI stays neutral (default zeros).
+  - Verify: user's eyes (tile scrolling diagonally in margins; menu/hilite/
+    marquee/status intact; with no tile configured, identical to today).
+- **T5 — MG1 skeletons**: `launcher/mg1_driver.asm` (8192B exact, carry
+  contract, stubs scf/ret) + `packager/mg1_to_yamanooto.py` (CRC32 E85C5731,
+  PATCHES from the verified table) + `MAPPER_MG1` (footprint_units=8, even
+  OFFR). **The complete verified design (20 intercept offsets, RAM map,
+  virtual-tape semantics, flash layout, unknowns) is in `docs/MG1_SAVES.md`.**
+- R800 on real turbo R hardware (user's call — emulator says OK).
+- Echo preserve verification (inject ECHO by debug in openMSX, launch, read
+  CFGR — openMSX allows software-set; hardware may not).
+- Backlog (from the user, unscheduled): GM2 migration to the per-game RMW
+  model, ASCII8-SRAM (Xanadu) / ASCII16-SRAM2 (Hydlide), full MG2 3-slot test.
 
-Tools: `pasmo` (Z80 asm), `python3`, `rust`/`cargo` (only for the GUI), `openMSX`.
+## Load-bearing gotchas (unchanged + new)
 
-1. **Assemble the MG2 save code** (order matters — the driver `incbin`s the engine):
-   ```
-   cd launcher
-   pasmo --bin mg2_engine.asm mg2_engine.bin
-   pasmo --bin mg2_driver.asm mg2_driver.bin
-   ```
-   ⚠️ **pasmo gotcha**: a negative `ds` (buffer overrun) makes pasmo emit an EMPTY .bin
-   with exit 0. ALWAYS check the size: `mg2_engine.bin` must be ~181 B, `mg2_driver.bin`
-   must be exactly 8192 B. (Windows: `for %I in (mg2_driver.bin) do @echo %~zI`.)
-2. **Patch your MG2 ROM** (your own legally-dumped GoodMSX RC-767 512KB dump — ROMs are
-   NOT in the repo; `.gitignore` blocks `*.rom`):
-   ```
-   python packager/mg2_to_yamanooto.py "<your MG2>.rom" mg2_patched.rom
-   ```
-3. **Pack** `mg2_patched.rom` with `mapper = "mg2"` into a Yamanooto image (via a TOML
-   config + `python packager/yamanooto_pack.py build config.toml -o image.rom`, or a small
-   inline script that calls `build_image`).
-4. **Run** (ALWAYS `-romtype Yamanooto`):
-   ```
-   openmsx -cart image.rom -romtype Yamanooto
-   ```
-   Save in-game (SNAK1/2/3), then to test persistence **quit openMSX cleanly** (it flushes
-   the 8MB flash on clean quit), reopen, and load.
-
-### openMSX flash persistence (path differs per OS)
-The whole 8MB flash is persisted to `<openMSX>/persistent/roms/<rom-name>/<rom-name>.SRAM`.
-- macOS: `~/.openMSX/persistent/roms/...`
-- Windows: `%APPDATA%\openMSX\persistent\roms\...` (or the openMSX "user directory").
-You can byte-check a save without looking at the screen: the save sector is at
-`game.flash_offset + 0x48*0x2000` in that `.SRAM`; slot `i` record at `+i*0x100`.
-
-### Gate + commit (forja)
-`.forja/gate.json` defines the gate (pasmo launcher, py-compile, cargo build/test). A
-commit-guard blocks `git commit` until the gate is GREEN and FRESH; run it first:
-`python3 <forja>/scripts/forensic-gate.py run` (the forja plugin may not be installed on
-the Windows box — if the guard isn't there, just make sure those 4 commands pass).
-Push target: `origin` = `github.com/antxiko/msx-yamanooto-npackr` (use the `antxiko` gh
-account). **Releases fire ONLY on pushing a `v*` tag** — pushing commits to `main` never
-makes a release.
-
-## What's next (pending)
-
-- **★ NEXT UP — reclaim flash from small games via CFGR SUBOFF (packer-only, no asm).**
-  Today the packer places every game at **32KB OFFR-unit** granularity, so a **16KB game
-  wastes 16KB** (it fills a whole 32KB unit) and there are **many** 16KB Konami titles → a
-  lot of flash lost. Fix: pack small K4/plain games at **8KB** granularity using the CFGR
-  SUBOFF field (2 bits, bits 4-5 = 0/8/16/24KB offset within a 32KB unit) so one 32KB unit
-  holds **2×16KB or 4×8KB** games.
-  - **VERIFIED the launch side is already wired end-to-end** (nothing to do in asm): the
-    trampoline computes CFGR with SUBOFF from `DIR_SUBOFF` (`launcher.asm:776-779`) and
-    applies it at launch (`launcher.asm:872-873`); openMSX resolves banks as
-    `(value + OFFR*4 + suboff) & 0x3FF`. The ONLY gap is the packer never assigns
-    `g.suboff` (always 0 today — `yamanooto_pack.py:383`, written to the dir entry at `:629`).
-  - **The change (Python only):** in `pack_games`, sub-place small K4/plain games inside a
-    32KB unit — assign `g.suboff` (bits 4-5) and put their data at the suboff-shifted flash
-    offset (`flash_offset = (offr*4 + suboff_banks) * BANK_SIZE`). A 16KB game uses only
-    banks 0-1, so at suboff=2 it maps to banks 2-3 and never collides with a suboff=0
-    neighbour — safe. Keep a per-32KB-unit sub-bitmap of free 8KB slots.
-  - **Out of scope / caveats:** SCC games are EXCLUDED (they need 16-OFFR alignment + the
-    wrap-mirror + the 0x3F trick). Only apply to games whose bank usage fits below the
-    suboff boundary (≤16KB → 2 banks, ≤8KB → 1 bank). Verify a couple of packed small games
-    boot + run correctly in openMSX afterwards. Savings ≈ (# of 16KB games) × 16KB.
-
-- **Optional**: full MG2 test — save 3 distinct states to SNAK1/2/3 and confirm each loads
-  its own (no cross-contamination). SNAK1 round-trip is already verified.
-- **Fase C — generalize the per-game 64KB RMW model to the other SRAM games**: migrate GM2
-  (currently on its own bespoke scheme) and add ASCII8-SRAM (Xanadu) / ASCII16-SRAM2
-  (Hydlide) — each gets its own 64KB sector, same RMW technique. You'll need those dumps.
-- The GUI (`gui-rs/`) has **no** save-system code yet; the save system is Python-only. If
-  the save flow must work from the GUI, it needs porting.
-
-## Load-bearing gotchas
-- Two copies of `launcher.bin` normally need syncing, but the MG2 save bins
-  (`mg2_driver.bin`/`mg2_engine.bin`) are single files embedded into the MG2 ROM — not part
-  of `launcher.bin`.
-- Absolute-bank access needs OFFR juggling, but the **per-game save sectors do NOT** (they
-  are relative to the game) — this is the big simplification over the earlier shared-pool idea.
-- openMSX workflow: launching is fine; **only a human should look at the screen** (don't
-  screenshot/analyze it). Debugger console dumps (PC/regs/RAM to a file) are OK when asked.
+- Two launcher.bin copies must stay in sync (gate check makes it mechanical).
+- Per-game save sectors don't need OFFR juggling (relative to the game).
+- SUBOFF must be IN CFGR before the bank writes (this session's bug).
+- Dummy games in test images DI/HALT by design — a frozen screen after
+  launching one is success, not a hang.
+- The directory sorts alphabetically; physical placement order is by size
+  descending within each pass — don't infer flash position from menu position.
