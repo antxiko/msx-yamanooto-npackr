@@ -112,7 +112,6 @@ struct App {
     marquee: String,
     title: String,
     flash_size: FlashSize,
-    scc_align: bool,
     show_splash: bool,
     boot_music: bool,
     tile: [u8; 8],
@@ -129,7 +128,6 @@ impl Default for App {
             marquee: String::new(),
             title: String::new(),
             flash_size: FlashSize::Mb8,
-            scc_align: true,
             show_splash: true,
             boot_music: true,
             tile: [0; 8],
@@ -415,12 +413,10 @@ impl eframe::App for App {
 
                 ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
                 ui.checkbox(&mut self.boot_music, "Boot jingle (Konami-style chime)");
-                ui.checkbox(&mut self.scc_align,
-                    "SCC 512KB alignment (openMSX 21 compat)")
-                    .on_hover_text("ON (default): SCC games sit at 512KB boundaries so \
-their music works in openMSX 21.0 (its SCC check is buggy; fixed after that release).\n\
-OFF: fully sequential packing — correct on REAL hardware and openMSX master builds, \
-but SCC music stays silent in openMSX 21.0.");
+                // The "SCC 512KB alignment (openMSX 21 compat)" checkbox was
+                // removed in v1.7: packing is always sequential (correct on
+                // real hardware, verified). The aligned mode survives in the
+                // Python builder (--scc-align / TOML) for openMSX 21.0 users.
 
                 // 8x8 background tile editor (baked into the launcher; the
                 // menu scrolls it diagonally in the background). All-off =
@@ -708,7 +704,9 @@ impl App {
         // Always apply the marquee field: empty -> blank marquee (not the default).
         let marquee_opt = Some(self.marquee.trim());
         let title_opt = if self.title.trim().is_empty() { None } else { Some(self.title.trim()) };
-        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, self.scc_align, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.scroll_dir, self.tile_color, self.colors);
+        // scc_align: always sequential since v1.7 (openMSX-21-only workaround;
+        // the aligned mode lives on in the Python builder for those users).
+        let result = pack::build_image(LAUNCHER_BIN, &mut games, self.flash_size, false, marquee_opt, title_opt, self.show_splash, self.boot_music, &self.tile, self.scroll_dir, self.tile_color, self.colors);
         let (image, dropped) = match result {
             Ok(r) => r,
             Err(e) => { self.status = format!("Build failed: {}", e); return; }

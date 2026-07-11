@@ -372,11 +372,12 @@ SCC_MIRROR_TARGET = 512 * 1024   # 64 banks. Validated working for Salamander 12
 #   "none"   — neither patch nor mirror; SCC music may not work but game runs.
 _scc_strategy = "auto"
 
-# SCC placement alignment. True (default) = 512KB-aligned slots, required for
-# SCC music in openMSX 21.0 (its SCC-enable check uses the OFFR-adjusted bank;
-# fixed in master, no release yet). False = sequential packing: correct on
-# real hardware / openMSX master builds, silent SCC in openMSX 21.0.
-_scc_align = True
+# SCC placement alignment. False (default since v1.7) = sequential packing:
+# correct on real hardware (verified) and openMSX master builds. True =
+# 512KB-aligned slots, only needed for SCC music in openMSX 21.0 (its
+# SCC-enable check uses the OFFR-adjusted bank; fixed in master). Re-enable
+# with --scc-align or [launcher].scc_align = true in the TOML.
+_scc_align = False
 
 
 class Game:
@@ -842,9 +843,12 @@ def cmd_build(args):
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
 
-    # SCC alignment: CLI --no-scc-align overrides TOML [launcher].scc_align.
+    # SCC alignment (openMSX 21.0 compat). Default OFF since v1.7. Precedence:
+    # --no-scc-align > --scc-align > TOML [launcher].scc_align > default.
     if args.no_scc_align:
         _scc_align = False
+    elif getattr(args, "scc_align", False):
+        _scc_align = True
     elif cfg.get("launcher", {}).get("scc_align") is not None:
         _scc_align = bool(cfg["launcher"]["scc_align"])
 
@@ -911,6 +915,11 @@ def cmd_test(args):
     """Build a minimal test image (launcher + dummy games) AND self-test the
     packer: asserts the SUBOFF sub-placement against hand-computed positions.
     Dummy games have a stub 'AB' header that just DI+HALTs."""
+    # The hand-computed positions below assume ALIGNED SCC mode (the twin Rust
+    # test suboff_parity_with_python asserts the same). Pin it: the capability
+    # stays tested even though the default flipped to sequential in v1.7.
+    global _scc_align
+    _scc_align = True
     here = Path(__file__).resolve().parent.parent
     launcher_data = (here / "launcher" / "launcher.bin").read_bytes()
 
@@ -1098,6 +1107,8 @@ def cmd_pack_folder(args):
     _scc_strategy = args.scc_strategy
     if args.no_scc_align:
         _scc_align = False
+    elif getattr(args, "scc_align", False):
+        _scc_align = True
     folder = Path(args.folder)
     launcher_path = Path(args.launcher) if args.launcher else (
         Path(__file__).resolve().parent.parent / "launcher" / "launcher.bin")
@@ -1236,10 +1247,16 @@ def main():
     pb.add_argument("--no-boot-music", action="store_true",
                     help="Silence the boot jingle (also [launcher].boot_music = false "
                          "in the TOML). Default: jingle plays.")
+    pb.add_argument("--scc-align", action="store_true",
+                    help="Pack SCC games at 512KB boundaries (openMSX 21.0 compat; "
+                         "wastes flash). Since v1.7 the default is sequential, which "
+                         "is correct on real hardware. Also [launcher].scc_align = "
+                         "true in the TOML.")
     pb.add_argument("--no-scc-align", action="store_true",
-                    help="Pack SCC games sequentially instead of 512KB-aligned. "
-                         "Correct on real hardware (and openMSX master), but SCC "
-                         "music stays SILENT in openMSX 21.0 (its SCC-enable check "
+                    help="(legacy, now the default) Pack SCC games sequentially "
+                         "instead of 512KB-aligned. Correct on real hardware (and "
+                         "openMSX master), but SCC music stays SILENT in openMSX "
+                         "21.0 (its SCC-enable check "
                          "is fixed only after that release). Also "
                          "[launcher].scc_align = false in the TOML.")
     pb.set_defaults(func=cmd_build)
@@ -1282,9 +1299,13 @@ def main():
                     help="Title-box colour (1-15 or name).")
     pf.add_argument("--no-boot-music", action="store_true",
                     help="Silence the boot jingle. Default: jingle plays.")
+    pf.add_argument("--scc-align", action="store_true",
+                    help="Pack SCC games at 512KB boundaries (openMSX 21.0 compat; "
+                         "wastes flash). Since v1.7 sequential is the default.")
     pf.add_argument("--no-scc-align", action="store_true",
-                    help="Pack SCC games sequentially (real hardware / openMSX "
-                         "master only — SCC music silent in openMSX 21.0).")
+                    help="(legacy, now the default) Pack SCC games sequentially "
+                         "(real hardware / openMSX master — SCC music silent in "
+                         "openMSX 21.0).")
     pf.set_defaults(func=cmd_pack_folder)
 
     args = p.parse_args()

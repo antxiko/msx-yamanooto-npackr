@@ -16,7 +16,21 @@ cartridge from your own legally-obtained Konami ROMs.
 **Native GUI (recommended)** — single binary for macOS / Linux / Windows.
 Download the latest [release](https://github.com/antxiko/msx-yamanooto-npackr/releases),
 launch the binary, drag-and-drop your ROMs, set a marquee + flash size, click
-**Build ROM**. No Python or other deps required.
+**Build ROM**. No Python or other deps required. Raw Metal Gear 1 / Metal Gear 2
+dumps are auto-patched on the fly so they **save to the cartridge flash** (no
+cassette, no Game Master 2 needed).
+
+> **⚠ Cartridge core requirement.** Konami-4 games (Metal Gear, Penguin
+> Adventure, Gradius/Nemesis, …), native ASCII8/16 and the PCM DAC
+> (Synthesizer, Majutsushi) need the **`ziggy1beta7` FPGA core or later** on
+> your Yamanooto (this toolkit is validated on real hardware with
+> `yimmi8beta2`). On older cores the K4 mapper selection is silently ignored
+> and those games boot to a black screen. Update with `YAMACORE <CORE>.BIN
+> /Sx` from MSX-DOS/Nextor and **power-cycle** (a warm reset does not load the
+> new core). Cores live in the official
+> [GitLab](https://gitlab.com/mfides/msx_dma_sw/-/tree/main/modules/yamanooto/release/core).
+> The `probe/` diagnostic ROM in this repo tells an old core from a new one in
+> one flash if you are unsure.
 
 **Python CLI (historical)** — the original `packager/yamanooto_pack.py`
 still works for users who prefer scripting. It does the same job as the
@@ -31,14 +45,20 @@ GUI, sharing the same `launcher.asm` and on-flash directory format.
 | `packager/yamanooto_pack.py` | Python CLI builder (alternative). Auto-detects mapper by SHA1 against openMSX's `softwaredb.xml`. |
 | `packager/ascii8_to_k5.py` | Stand-alone ASCII8 → K5 converter (the GUI does this in memory). |
 | `packager/ascii16_to_k5.py` | Stand-alone ASCII16 → K5 converter (the GUI does this in memory). |
+| `packager/mg1_to_yamanooto.py` / `mg2_to_yamanooto.py` | Metal Gear 1 / 2 patchers: redirect cassette / Game Master 2 saves to a 64KB flash sector on the cartridge (the GUI applies them automatically to raw dumps). |
+| `probe/` | **K4-PROBE diagnostic ROM**: prints how the cartridge's mapper really behaves (register readbacks, K4 vs K5 decode, master offset). One flash distinguishes an old FPGA core from a current one. See `probe/EXPECTED.md`. |
 | `catalog/konami_catalog.toml` | Reference list of Konami MSX cartridge dumps with their mappers (informational). |
 
 ## Requirements
 
 - **GUI**: nothing — single binary in the [Releases page](https://github.com/antxiko/msx-yamanooto-npackr/releases).
+- **Yamanooto core `ziggy1beta7` or later** (validated with `yimmi8beta2`) on the cartridge (see the warning
+  above — older cores have no working Konami-4 mapper selection).
 - **Python CLI** (optional): Python 3.11+ (or 3.10 with `tomli`).
 - **Pasmo** (only if you want to rebuild the launcher from source): `brew install pasmo` on macOS.
-- **openMSX 21+** (optional, for testing — the Yamanooto extension is built in).
+- **openMSX 21+** (optional, for testing — the Yamanooto extension is built in.
+  Note: openMSX emulates the OLD cartridge firmware; see the SCC alignment and
+  DAC notes below).
 
 ## Quick start
 
@@ -48,7 +68,9 @@ GUI, sharing the same `launcher.asm` and on-flash directory format.
 cd launcher && pasmo --bin launcher.asm launcher.bin
 ```
 
-Produces `launcher/launcher.bin` (~1.3 KB).
+Produces `launcher/launcher.bin` (~6.2 KB). **Always size-check the output**:
+pasmo emits an empty binary with exit code 0 if an internal `ds` guard goes
+negative.
 
 ### 2. List your games in TOML
 
@@ -113,6 +135,9 @@ if shorter than 64 chars, truncated if longer.
 
 Per the cartridge's user manual:
 
+0. **First time / K4 games black-screen**: update the FPGA core to
+   `ziggy1beta7` or later (`YAMACORE <CORE>.BIN /Sx`; validated with
+   `yimmi8beta2`) and **power-cycle** — the new core only loads on a cold boot.
 1. Hold **DEL** during MSX boot to bypass any current ROM on the cart.
 2. Boot MSX-DOS from your MegaFlashROM SCC+ SD / Carnivore / SD Mapper / floppy.
 3. Put `yamanooto.rom` and `YAMAFX.com` in the **root** (subdirectories don't work).
@@ -134,14 +159,14 @@ the mapper is supported natively or whether you need a converter.
 
 | ROM mapper (softwaredb name) | Yamanooto handling | Notes |
 | --- | --- | --- |
-| `KonamiSCC`                 | Native K5/SCC, **OFFR aligned to multiples of 16** (512KB boundary) | See "openMSX 21.0 SCC bug" below. Games < 512K get an 8KB wrap-mirror placed at flash bank `OFFR*4 + 63` so the `0x3F` SCC-enable trick lands on the game's music driver. The rest of the 512K slot is reusable for K4/plain games. |
-| `Konami` (Konami-4)         | Native K4         | Any OFFR. No mirror needed. |
+| `KonamiSCC`                 | Native K5/SCC, packed **sequentially** (since v1.7) | Games < 512K get an 8KB wrap-mirror placed at flash bank `OFFR*4 + 63` so the `0x3F` SCC-enable trick lands on the game's music driver. The old 512KB alignment was only ever an openMSX 21.0 workaround — re-enable it with `--scc-align` / `[launcher].scc_align = true` (Python builder) if you still test there. |
+| `Konami` (Konami-4)         | Native K4 — **requires the `ziggy1beta7`+ core** | Any OFFR. No mirror needed. The launcher feeds the offset through the core's master-offset register (official YAMABOOT protocol), which openMSX's old-firmware model also accepts. |
 | `Mirrored` (8KB/16KB carts) | Native via K4+MDIS, bank pattern `0,0,0,0` / `0,1,0,1` | Stays its original size in flash; mirror happens in the mapper. |
 | `0x4000` (16KB at page 1)   | Same as Mirrored  | |
 | `ASCII8`                    | Convert via `ascii8_to_k5.py` (use `mapper = "k5"` in TOML after conversion) | Rewrites `LD (nn),A` opcodes that hit the ASCII8 switch zone. Note: if a "GoodMSX" K4 dump of the same game exists, prefer that — most Konami carts dumped as ASCII8 are re-packs of an originally K4 cart. |
 | `ASCII16`                   | Convert via `ascii16_to_k5.py` (mapper = "ascii16_k5") | Installs a RAM helper at 0xF000 that the patched ROM CALLs. Validated with Golvellius. |
-| `Synthesizer`               | Loaded as plain 32K. The Yamanooto FPGA emulates the PCM DAC on real hardware, so audio works. **openMSX gotcha:** `Yamanooto.cc` (21.0 and master) does not implement the DAC — the cart runs but stays silent in the emulator. Verify the dump in openMSX by loading it standalone with `-romtype Synthesizer`. |
-| `Majutsushi`                | Loaded as Konami-4 (K4). The cart is a normal K4 with an extra 8-bit DAC at `0x5000-0x5FFF` (Hai no Majutsushi - Mahjong 2). The Yamanooto FPGA emulates the DAC on real hardware. **Same openMSX gotcha as Synthesizer** — silent in emulator. |
+| `Synthesizer`               | Loaded as plain 32K. The Yamanooto FPGA emulates the PCM DAC **with a current core** (verified on real hardware with `yimmi8beta2`; older cores stay mute). **openMSX gotcha:** `Yamanooto.cc` (21.0 and master) does not implement the DAC — the cart runs but stays silent in the emulator. |
+| `Majutsushi`                | Loaded as Konami-4 (K4). The cart is a normal K4 with an extra 8-bit DAC at `0x5000-0x5FFF` (Hai no Majutsushi - Mahjong 2). Same core requirement and openMSX gotcha as Synthesizer. |
 | `GameMaster2`, `keyboardmaster` | Not supported | Hardware-specific. |
 
 ### Mapper kinds in TOML
@@ -161,21 +186,28 @@ Power on
   ├─ BIOS scans cart slots, finds "AB" header at the launcher in flash bank 0
   ├─ BIOS calls launcher INIT
   │   ├─ Sets page 2 = cart slot (BIOS leaves page 2 = RAM by default)
+  │   ├─ Resets cartridge config (master offset, mapper OFFR, CFGR except the
+  │   │  user's Echo bit) — on real hardware these SURVIVE a soft reset
   │   ├─ Pages directory bank (15) at 0xA000-0xBFFF
   │   ├─ Shows splash with copyright/scam notice
-  │   ├─ Draws menu + scrolling marquee
+  │   ├─ Draws menu + scrolling marquee + status-row toggles:
+  │   │  '5' = 50/60Hz (applied LIVE to VDP R#9, MSX2+),
+  │   │  '8' = Z80/R800 (turbo R only), HOME = PSG Echo (cartridge feature)
   │   └─ Polls keyboard
   └─ On ENTER:
       ├─ Copies the directory entry to RAM
-      ├─ Copies the trampoline (≈90 bytes) to 0xC000
-      ├─ Optionally copies the ASCII16 helper to 0xF000
+      ├─ Copies the trampoline (<256 bytes) to 0xC000
+      ├─ Optionally copies the ASCII16 / SRAM helpers to 0xF000+
       ├─ Trampoline at 0xC000:
-      │   ├─ ENAR.REGEN = 1
-      │   ├─ CFGR = 0 (clean K5 with MDIS=0 so bank writes work)
-      │   ├─ OFFR = game offset
-      │   ├─ Writes 4 bank registers (commits OFFR)
+      │   ├─ ENAR.REGEN = 1 (plus MSTEN for plain K4 games)
+      │   ├─ CFGR = SUBOFF|ECHO (clean K5, MDIS=0, so bank writes work)
+      │   ├─ 0x7FFE = game offset — plain K4 games write it with MSTEN=1 so
+      │   │  current cores load the MASTER offset (official YAMABOOT protocol);
+      │   │  openMSX's old-firmware model reads the same write as its OFFR
+      │   ├─ Writes 4 bank registers (K5 regs; commits the offset in openMSX)
       │   ├─ CFGR = final value (K4 / MDIS / SUBOFF as required)
       │   ├─ ENAR = 0 (lock — game can't accidentally clobber CFGR)
+      │   ├─ K4 games: re-prime windows 1-3 via 0x6000/0x8000/0xA000
       │   └─ CALLs the game's INIT vector
       └─ If the game's INIT returns (hook-based games like Metal Gear 2):
           └─ Falls through to a JP 0x0000 BIOS warm-boot.
@@ -186,6 +218,12 @@ Power on
 ```
 
 ## Validated games
+
+**On real hardware (2026-07, Yamanooto with `yimmi8beta2` core):** full
+collection image built with the GUI — launcher, Konami-4 (Metal Gear, Penguin
+Adventure, Gradius/Nemesis, …), SCC games with music (sequential packing, no
+alignment), **Metal Gear 1 & 2 saving and loading from cartridge flash**, and
+Synthesizer with working PCM audio.
 
 End-to-end tested in openMSX 21 with the `Yamanooto` mapper:
 
@@ -227,10 +265,12 @@ These are documented because we hit them and they cost time.
    SCC carts mask the bank value to the ROM's bank count (a 128K cart →
    `value & 0xF`). Salamander writes `0x3F` which wraps to bank 15 (last
    bank, where the music driver lives) AND simultaneously enables the SCC
-   chip. The Yamanooto doesn't auto-mask, AND openMSX 21.0 currently
-   checks `bankRegs[2]` (the offset-adjusted value) instead of `rawBanks[2]`.
-   Consequence: SCC games must be placed at OFFR multiples of 16
-   (512KB-aligned). Full write-up in
+   chip. The Yamanooto doesn't auto-mask, AND openMSX 21.0 checks
+   `bankRegs[2]` (the offset-adjusted value) instead of `rawBanks[2]`.
+   On REAL hardware the raw value is checked, so no alignment is needed —
+   verified 2026-07 on a physical cartridge. Since v1.7 packing is
+   sequential by default; the 512KB-aligned mode survives as an opt-in
+   (`--scc-align` / TOML) purely for openMSX 21.0 users. Full write-up in
    [`docs/SCC_ALIGNMENT.md`](docs/SCC_ALIGNMENT.md).
 
 5. **Wrap-mirror is just 8KB**, not 512KB. For SCC games < 512K, the
@@ -240,21 +280,23 @@ These are documented because we hit them and they cost time.
    to pack K4/plain games. This is a huge save vs the "full 4x mirror"
    approach.
 
-6. **Metal Gear 2 needs `JP 0x0000` warm-boot.** MG2's INIT installs a
-   hook at H.CHGE (0xFEDA) and `RET`s, expecting BIOS to call CHGMOD
-   later. The trampoline pushes the RAM address of its `tramp_warmboot`
-   routine before `jp (hl)`-ing to game INIT. If game RETs, control
-   falls through to `jp 0x0000`, BIOS reboots and runs the standard
-   cart-init flow which triggers the hook. Salamander and other games
-   that take over the CPU directly skip this path entirely.
+6. **Hook-based games (Metal Gear 2) need `JP 0x0000` warm-boot.** MG2's
+   INIT installs an H.CHGE hook at 0xFEDA and `RET`s, expecting BIOS to
+   call CHGMOD later as part of its post-INIT flow. The trampoline pushes
+   the RAM address of its `tramp_warmboot` routine before `jp (hl)`-ing to
+   game INIT: if the game RETs, control falls through to `jp 0x0000`, BIOS
+   reboots and runs the standard cart-init flow which fires the hook.
+   Games that take over the CPU directly (Salamander, Vampire Killer, …)
+   skip this path and load instantly.
 
-5. **Hook-based games (Metal Gear 2).** MG2's INIT installs an H.CHGE
-   hook at 0xFEDA and `RET`s, expecting BIOS to call CHGMOD later as part
-   of its post-INIT flow. Our launcher calls INIT directly, so the hook
-   never fires unless we fall through to a `JP 0x0000` warm-boot. The
-   launcher uses warm-boot only when INIT returns; games that take over
-   the CPU directly (Salamander, Vampire Killer, etc.) avoid it and load
-   instantly.
+7. **Konami-4 needs a current core (`ziggy1beta7`+) — the hard way.** Two full days
+   of black screens on real hardware, one diagnostic ROM (`probe/`) and one
+   read of the official YAMABOOT source later: older FPGA cores simply do
+   not store the CFGR K4 mapper bit (the same write DOES store MDIS), so
+   the cartridge silently stays in K5 mode and every Konami-4 bank write
+   lands on dead addresses. openMSX never reproduces it because it models
+   the old firmware where the bit works. If K4 games black-screen on your
+   cartridge: update the core first, ask questions later.
 
 ## Build verification
 

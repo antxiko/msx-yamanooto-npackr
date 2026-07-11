@@ -143,6 +143,14 @@ fn sub_slots_needed(g: &Game) -> Option<usize> {
 
 pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize, scc_align: bool)
     -> Result<Vec<Game>, String> {
+    pack_games_with_stats(games, flash, scc_align).map(|(dropped, _used)| dropped)
+}
+
+/// Same placement as `pack_games`, but also reports how many 32KB OFFR units
+/// ended up occupied (including the 4 reserved header units). This is what the
+/// GUI free-space indicator runs as a dry-run: same allocator, same verdict.
+pub fn pack_games_with_stats(games: &mut Vec<Game>, flash: FlashSize, scc_align: bool)
+    -> Result<(Vec<Game>, usize), String> {
     let n_slots = flash.max_offr();
     let mut occupied = vec![false; n_slots];
     // Reserve everything below GAMES_POOL_START.
@@ -301,7 +309,33 @@ pub fn pack_games(games: &mut Vec<Game>, flash: FlashSize, scc_align: bool)
 
     placed.sort_by_key(|g| g.offr);
     *games = placed;
-    Ok(dropped)
+    let used_units = occupied.iter().filter(|&&u| u).count();
+    Ok((dropped, used_units))
+}
+
+/// Dry-run placement summary for the GUI indicator. Consumes a CLONED game
+/// list (never the GUI's own entries) and never allocates the flash image.
+pub struct PackPlan {
+    pub used_units: usize,       // 32KB units occupied, incl. the 4 reserved
+    pub total_units: usize,      // 64 (2MB) or 256 (8MB)
+    pub dropped: Vec<String>,    // titles that did not fit
+}
+
+pub fn plan_games(mut games: Vec<Game>, flash: FlashSize, scc_align: bool) -> PackPlan {
+    match pack_games_with_stats(&mut games, flash, scc_align) {
+        Ok((dropped, used_units)) => PackPlan {
+            used_units,
+            total_units: flash.max_offr(),
+            dropped: dropped.into_iter().map(|g| g.title).collect(),
+        },
+        // pack_games never errors today; keep a defensive fallback that shows
+        // everything as dropped rather than lying about free space.
+        Err(_) => PackPlan {
+            used_units: flash.max_offr(),
+            total_units: flash.max_offr(),
+            dropped: games.into_iter().map(|g| g.title).collect(),
+        },
+    }
 }
 
 pub fn build_directory(games: &[Game]) -> Result<Vec<u8>, String> {
