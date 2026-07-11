@@ -1,0 +1,38 @@
+# K4 PROBE test image — BUG-HW-A (Ziggy master-offset trampoline fix + probe)
+#
+# Build FROM THE REPO ROOT (the launcher path resolves against the CWD):
+#   python packager\yamanooto_pack.py build probe\k4probe.toml -o k4probe_image.rom
+#
+# Placement REQUIREMENTS (verify in the build output before flashing):
+#   K4 PROBE    -> OFFR=0x04 (the engine hardcodes PROBE_OFFR=4)
+#   K4 PROBE B  -> OFFR=0x08 (the 'Q' signatures encode the +256KB region)
+# The probes are listed first so the no-SCC first-fit assigns them units 4-11.
+
+[launcher]
+file = "launcher/launcher.bin"
+
+[[games]]
+title  = "K4 PROBE"
+file   = "k4probe.rom"
+mapper = "k5"                 # flags 0x00 launch path (hardware-verified via SCC)
+
+[[games]]
+title  = "K4 PROBE B PLAIN"
+file   = "k4probe_b.rom"
+mapper = "plain"              # boot fallback: K4|MDIS, mapper frozen
+
+[[games]]
+title = "PENGUIN ADVENTURE"   # K4 128KB control (unpatched)
+file  = "../KONAMIS/Penguin Adventure - Yumetairiku Adventure - Konami (1986) [RC-743] [GoodMSX] [2534].rom"
+
+[[games]]
+title = "GRADIUS NEMESIS"     # K4 128KB control (unpatched)
+file  = "../KONAMIS/Gradius - Nemesis - Konami (1986) [RC-742] [GoodMSX] [874].rom"
+
+[[games]]
+title = "SALAMANDER"          # SCC control (no-regression of the K5 path)
+file  = "../KONAMIS/Salamander - Konami (1987) [RC-758] [1988].rom"
+
+[[games]]
+title = "ANTARCTIC ADVENTURE" # plain 16KB control
+file  = "../KONAMIS/Antarctic Adventure - Konami (1984) [RC-701] [113].rom"

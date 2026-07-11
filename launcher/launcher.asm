@@ -93,6 +93,12 @@ YAMA_CFGR equ 0x7FFD
 
 ; ENAR bits
 ENAR_REGEN equ 0x01
+ENAR_SDEN  equ 0x02         ; Ziggy cores: SD-card interface enable (unused here)
+ENAR_MSTEN equ 0x04         ; Ziggy cores: while set, a write to 0x7FFE loads the
+                            ; MASTER offset (shifts the whole flash decode) instead
+                            ; of the legacy mapper OFFR. Old firmware / openMSX
+                            ; ignore this bit. Source: official YAMABOOT.Z8A
+                            ; (GitLab mfides/msx_dma_sw), routines SELOFF/SELCHK.
 ENAR_WREN  equ 0x10
 
 ; CFGR bits
@@ -252,6 +258,40 @@ init:
     and  0xCF               ; clear page 2 bits
     or   c                  ; page 2 = page 1 slot
     out  (0xA8), a
+
+    ; --- Reset cartridge config to power-on state ---
+    ; On REAL hardware CFGR and OFFR SURVIVE a soft reset (cart session
+    ; 2026-07-09: after launching a K4 game, reset showed NO DIRECTORY -
+    ; the stale CFGR.K4 broke dir_page_in's MAP_BANK3 write; openMSX clears
+    ; every register on reset so the emulator never reproduces this).
+    ; Clear the Ziggy MASTER offset first (write to 0x7FFE with MSTEN=1;
+    ; the K4 launch path sets it — a stale value would shift the whole
+    ; decode). On openMSX/old firmware this is just an extra offsetReg=0.
+    ; Then open the regs, clear CFGR preserving only the user's ECHO bit,
+    ; zero the mapper OFFR, re-prime the launcher's four banks now that K5
+    ; decode is guaranteed, and lock again. The K4 launch path RELIES on the
+    ; mapper OFFR being 0 (it only sets the master offset). Page 2 is
+    ; already mapped to this slot.
+    ld   a, ENAR_REGEN | ENAR_MSTEN
+    ld   (YAMA_ENAR), a
+    xor  a
+    ld   (YAMA_OFFR), a     ; Ziggy: MASTER offset = 0 / openMSX: offsetReg = 0
+    ld   a, ENAR_REGEN
+    ld   (YAMA_ENAR), a     ; MSTEN off, registers stay open
+    ld   a, (YAMA_CFGR)
+    and  CFGR_ECHO          ; also masks FPGA_WAIT (bit 7 reads as 1)
+    ld   (YAMA_CFGR), a     ; K4=0 MDIS=0 SUBOFF=0 ROMDIS=0, ECHO kept
+    xor  a
+    ld   (YAMA_OFFR), a
+    ld   (MAP_BANK0), a
+    inc  a
+    ld   (MAP_BANK1), a
+    inc  a
+    ld   (MAP_BANK2), a
+    inc  a
+    ld   (MAP_BANK3), a
+    xor  a
+    ld   (YAMA_ENAR), a     ; lock (launch paths reopen it when needed)
 
     ; --- machine detection (page 0 = main BIOS during cart INIT, so the
     ;     version byte can be read directly; RDSLT would be the robust
@@ -928,6 +968,10 @@ P_CFGR       equ TRAMP_PARAMS + 0   ; 1 byte
 P_OFFR       equ TRAMP_PARAMS + 1   ; 1 byte
 P_BANKS      equ TRAMP_PARAMS + 2   ; 4 bytes
 P_ECHO       equ TRAMP_PARAMS + 6   ; 1 byte: preserved CFGR ECHO bit (0x00/0x02)
+P_ENARSEL    equ TRAMP_PARAMS + 7   ; 1 byte: ENAR value for the OFFR write
+                                    ; (REGEN, or REGEN|MSTEN for plain K4 ->
+                                    ; Ziggy master offset; computed in
+                                    ; launch_game to keep the trampoline small)
 
 launch_game:
     ; HL -> entry in paged-in flash (0xA000+). Copy 32 bytes to RAM cache.
@@ -971,6 +1015,26 @@ lg_no_r800:
     and  CFGR_SUBOFF
     or   c
     ld   (P_CFGR), a
+
+    ; --- ENAR value for the trampoline's 0x7FFE (offset) write ---
+    ; Plain K4 (K4=1, MDIS=0, SUBOFF=0) -> REGEN|MSTEN: on Ziggy cores the
+    ; offset then lands in the MASTER offset register, which is what the
+    ; official YAMABOOT does for K4 (see the trampoline OFFR notes).
+    ; Everything else (K5/SCC, PLAIN/MDIS, sub-placed K4) -> plain REGEN:
+    ; legacy mapper OFFR, hardware-verified for those paths.
+    ; Computed here (ROM side, no size pressure) so the trampoline stays
+    ; under its 256-byte budget. A still holds the P_CFGR bits.
+    ld   b, a
+    and  CFGR_K4
+    ld   c, ENAR_REGEN
+    jr   z, lg_enarsel
+    ld   a, b
+    and  CFGR_MDIS | CFGR_SUBOFF
+    jr   nz, lg_enarsel
+    ld   c, ENAR_REGEN | ENAR_MSTEN
+lg_enarsel:
+    ld   a, c
+    ld   (P_ENARSEL), a
 
     ld   a, (entry_cache + DIR_OFFR)
     ld   (P_OFFR), a
@@ -1090,8 +1154,27 @@ tramp_no_scc_helper:
     ld   (YAMA_CFGR), a
 
     ; OFFR — game position (32K units). Has no effect until a mapper write.
+    ;
+    ; Ziggy-core protocol (official YAMABOOT.Z8A, routines SELOFF/SELCHK):
+    ; plain K4 games get their offset as the MASTER offset — the write to
+    ; 0x7FFE happens with ENAR.MSTEN=1 — and the legacy mapper OFFR stays 0
+    ; (guaranteed by the init reset block). The Ziggy K4 mapper takes the
+    ; game's runtime bank writes RAW and shifts the whole decode by the
+    ; master offset; feeding the offset through the legacy mapper OFFR
+    ; instead leaves the runtime writes pointing at absolute banks 0-15
+    ; (launcher area) -> garbage -> black screen (real-hw sessions 07-09).
+    ; openMSX models the OLD firmware: it ignores MSTEN and treats this same
+    ; 0x7FFE write as its offsetReg, which the STEP-2 bank writes latch — so
+    ; the single write is correct in BOTH worlds. K5/SCC/PLAIN and sub-placed
+    ; K4 (SUBOFF!=0, 8KB granularity the 32K master can't express) keep the
+    ; legacy path, which is hardware-verified for K5/SCC.
+    ld   a, (P_ENARSEL)             ; REGEN, or REGEN|MSTEN for plain K4
+    ld   (YAMA_ENAR), a
     ld   a, (P_OFFR)
     ld   (YAMA_OFFR), a
+    ; No ENAR restore needed: MSTEN only redirects 0x7FFE (not written again
+    ; before STEP 4 clears ENAR entirely), CFGR writes are unaffected, and
+    ; openMSX only cares about the REGEN bit (still set).
 
     ; STEP 2: prime mapper banks (this also commits OFFR).
     ld   a, (P_BANKS + 0)
@@ -1116,6 +1199,32 @@ tramp_no_scc_helper:
     ; symptom: SCC music stops working while graphics keep going.
     xor  a
     ld   (YAMA_ENAR), a
+
+    ; STEP 4b: K4 games — re-prime windows 1-3 through the CANONICAL
+    ; Konami-4 addresses (0x6000/0x8000/0xA000). Two reasons:
+    ;  - openMSX: in K4 mode the STEP-3 CFGR write (0x7FFD) and the STEP-4
+    ;    ENAR write (0x7FFF) themselves fall through into the K4 window-1
+    ;    zone and zap bankRegs[1]; these writes repair it (they latch
+    ;    OFFR*4+SUBOFF, so they land on the game's banks).
+    ;  - Ziggy hw: harmless/correct — raw values + master offset, the same
+    ;    addresses and semantics the game itself uses at runtime.
+    ; (The 2026-07-09 hypothesis that the FPGA doesn't carry K5-primed banks
+    ; into K4 was WRONG — official YAMABOOT says "K4 DOESNT NEED CHANGE
+    ; BANKS". The real launch bug was the offset mechanism; see the OFFR
+    ; block above.) These are plain game-style bank writes (no REGEN
+    ; involved) and sit AFTER the ENAR lock, so nothing can clobber them.
+    ; Window 0 has no K4 register: it keeps the STEP-2 value (game bank 0).
+    ; MDIS games ignore the writes; K5/SCC games skip this block.
+    ld   a, (P_CFGR)
+    and  CFGR_K4
+    jr   z, tramp_no_k4_reprime
+    ld   a, (P_BANKS + 1)
+    ld   (0x6000), a
+    ld   a, (P_BANKS + 2)
+    ld   (0x8000), a
+    ld   a, (P_BANKS + 3)
+    ld   (0xA000), a
+tramp_no_k4_reprime:
 
     ; 0x4000-0xBFFF now shows the game. Strategy:
     ;   - CALL the game's INIT directly. Most games take over the CPU (set
@@ -1208,6 +1317,11 @@ scc_helper:
 scc_helper_end:
 
 trampoline_end:
+    ; HARD GUARD: the block above is copied to TRAMP_RAM (0xC000) and must
+    ; stay below TRAMP_PARAMS (0xC100) or the copy overwrites the params.
+    ; If it outgrows 256 bytes this ds goes NEGATIVE -> pasmo emits an
+    ; EMPTY .bin (exit 0) -> the gate's size check fails the build.
+    ds   0x100 - (trampoline_end - trampoline_src), 0
 
 ;==============================================================================
 ; SRAM EMULATION (FLAG_SRAM games)

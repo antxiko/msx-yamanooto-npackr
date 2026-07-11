@@ -1,0 +1,2 @@
+# pasmo/make_probe_rom.py build artifacts (sources + toml are the truth)
+*.bin
