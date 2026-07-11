@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.7.2 — 2026-07-11
+
+- **Launcher toggle keys remapped.** In the in-cart menu, **TAB** now switches
+  50/60 Hz (was `'5'`) and **F1** switches Z80/R800 on turbo R (was `'8'`). F1 is
+  read straight from the keyboard matrix (`SNSMAT`, edge-detected) because the
+  BIOS expands function keys to their `FNKSTR`; the launcher now also zeroes
+  `FNKSTR` at init so pressing F1 can't inject its definition string (and a stray
+  space that would launch a game) into the key buffer. No flash-format change —
+  v1.7/v1.7.1 images stay compatible; only the embedded `launcher.bin` changed.
+- **New doc `docs/METAL_GEAR_SRAM_COMPAT.md`** — which Metal Gear 1/2 MSX2 dumps
+  are compatible with the SRAM save patch, triaged from the 90 Metal Gear dumps
+  on file-hunter. MG1 saves confirmed on real hardware (Spanish build), MG2 for
+  Spanish and English v1.4.
+
 ## v1.7.1 — 2026-07-11
 
 GUI redesign only — no launcher, builder or flash-format changes (v1.7 images

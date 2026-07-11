@@ -15,8 +15,9 @@
    CFGR=SUBOFF|ECHO ANTES de los bank writes (STEP 1). Si se toca ese orden,
    los juegos sub-colocados arrancan el vecino del slot 0.
 2. **Jingle de arranque opcional (c71431b)** — YMNTCFG!+12, TOML/CLI/GUI.
-3. **Toggles runtime (446ca09)** — '5' = 50/60Hz (MSX2+, VDP R#9 bit1 +
-   espejo RG9SAV), '8' = R800 DRAM (solo turbo R, CHGCPU 0x82 antes del di).
+3. **Toggles runtime (446ca09; teclas remapeadas en v1.7.2)** — TAB = 50/60Hz
+   (MSX2+, VDP R#9 bit1 + espejo RG9SAV), F1 = R800 DRAM (solo turbo R, CHGCPU
+   0x82 antes del di; F1 se lee por SNSMAT con FNKSTR anulada).
    Detección por BIOS 0x002D en el arranque; estado en la fila 22.
    50/60 verificado (R9=2/0 según toggle); R800 verificado en emulador
    (FS-A1GT) — **pendiente hardware real** para veredicto final.

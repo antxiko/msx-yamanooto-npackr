@@ -191,8 +191,8 @@ Power on
   │   ├─ Pages directory bank (15) at 0xA000-0xBFFF
   │   ├─ Shows splash with copyright/scam notice
   │   ├─ Draws menu + scrolling marquee + status-row toggles:
-  │   │  '5' = 50/60Hz (applied LIVE to VDP R#9, MSX2+),
-  │   │  '8' = Z80/R800 (turbo R only), HOME = PSG Echo (cartridge feature)
+  │   │  TAB = 50/60Hz (applied LIVE to VDP R#9, MSX2+),
+  │   │  F1 = Z80/R800 (turbo R only), HOME = PSG Echo (cartridge feature)
   │   └─ Polls keyboard
   └─ On ENTER:
       ├─ Copies the directory entry to RAM

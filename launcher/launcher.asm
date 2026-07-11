@@ -49,6 +49,9 @@ BDRCLR  equ 0xF3EB          ; border colour
 MSXVER  equ 0x002D          ; Main-ROM: 0=MSX1 1=MSX2 2=MSX2+ 3=turbo R
 CHGCPU  equ 0x0180          ; turbo R BIOS: A bits1-0 00=Z80 01=R800ROM 10=R800DRAM, bit7=LED
 RG9SAV  equ 0xFFE8          ; system RAM: mirror of VDP R#9 (bit1 NT: 1=50Hz 0=60Hz)
+SNSMAT  equ 0x0141          ; scan keyboard matrix row: A=row in, A=row bits out (0=pressed)
+FNKSTR  equ 0xF87F          ; function-key strings (10 x 16 bytes); zeroed at init so F1..F10
+                            ; don't stuff their definition into the key buffer
 
 ;------------------------------------------------------------------------------
 ; SCREEN 2 VRAM layout (standard) + the font-blitter menu palette.
@@ -211,14 +214,15 @@ v_col_box     equ RAM_BASE + 82   ; 1 byte: title box edges   = box<<4 | bg
 sel_index     equ RAM_BASE + 83   ; 2 bytes: directory index of the launched game
                                   ; (needed to look up its SRAM-table entry)
 msx_version   equ RAM_BASE + 85   ; 1 byte: BIOS 0x002D cached at boot
-opt_hz        equ RAM_BASE + 86   ; 1 byte: 0 = 50Hz, 1 = 60Hz (session toggle, '5' key)
-opt_r800      equ RAM_BASE + 87   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session toggle, '8' key)
+opt_hz        equ RAM_BASE + 86   ; 1 byte: 0 = 50Hz, 1 = 60Hz (session toggle, TAB key)
+opt_r800      equ RAM_BASE + 87   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session toggle, F1 key)
 anim_vphase   equ RAM_BASE + 88   ; 1 byte: tile animation vertical phase (0..7)
 anim_ticker   equ RAM_BASE + 89   ; 1 byte: frame divider for ANIM_RATE
 tile_buf      equ RAM_BASE + 90   ; 8 bytes: rotated tile scratch for anim_tick
 mdr_ncells    equ RAM_BASE + 98   ; 1 byte: text cells of the list/status row being drawn
 anim_hphase   equ RAM_BASE + 99   ; 1 byte: tile animation horizontal phase (0..7)
 dsr_pagcell   equ RAM_BASE + 100  ; 1 byte: first cell of "PAG x/y" (status row remap)
+hk_f1         equ RAM_BASE + 101  ; 1 byte: F1 down last frame (edge-detect for CPU toggle)
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -314,6 +318,16 @@ init:
     ld   (anim_vphase), a
     ld   (anim_hphase), a
     ld   (anim_ticker), a
+    ld   (hk_f1), a         ; F1 edge-detect state (not pressed at boot)
+    ; Wipe the function-key strings so pressing F1 (read directly via SNSMAT
+    ; for the CPU toggle) doesn't ALSO queue its FNKSTR into the key buffer —
+    ; a default "color "/"run" string would inject a space and launch a game.
+    ld   hl, FNKSTR
+    ld   b, 160             ; 10 keys x 16 bytes
+fnk_clear:
+    ld   (hl), a
+    inc  hl
+    djnz fnk_clear
 
     ; --- screen setup (SCREEN 2) using the packager-configured colours ---
     call init_colors        ; build v_col_* in RAM + set FORCLR/BAKCLR/BDRCLR
@@ -348,6 +362,7 @@ main_loop:
     halt                    ; one frame tick
     call scroll_tick        ; keep the marquee moving every frame (even during nav)
     call anim_tick          ; background tile diagonal scroll (no-op with tile=0)
+    call scan_f1            ; F1 = Z80/R800 toggle (matrix scan; CHGET can't see F-keys)
     call CHSNS              ; Z=1 if no key in buffer
     jr   z, main_loop
     call CHGET
@@ -363,16 +378,15 @@ main_loop:
     jp   z, do_launch
     cp   ' '
     jp   z, do_launch
-    cp   '5'                ; mnemonic "50/60"
+    cp   9                  ; TAB = 50/60Hz toggle
     jp   z, toggle_hz
-    cp   '8'                ; mnemonic "R800"
-    jp   z, toggle_r800
     call menu_jump_letter   ; A = key; jumps if it's a letter, else no-op
     jp   main_loop
 
-; toggle_hz / toggle_r800 — flip the session toggles ('5' / '8' keys).
-; Silently ignored on machines without the feature (no UI is shown there
-; either, so the keys look dead — intended).
+; toggle_hz — flip the 50/60Hz session toggle (TAB key, delivered by CHGET as
+; code 0x09). Silently ignored on machines without the feature (no UI is shown
+; there either, so the key looks dead — intended). The CPU toggle (F1) lives in
+; do_toggle_r800 below, driven by scan_f1's matrix scan.
 toggle_hz:
     ld   a, (msx_version)
     or   a
@@ -409,16 +423,37 @@ apply_hz_set:
     out  (0x99), a          ; write register 9
     ret
 
-toggle_r800:
+; scan_f1 — F1 (key matrix row 6, bit 5) toggles Z80/R800, edge-detected so
+; holding it flips once per press. Read via SNSMAT because CHGET expands
+; function keys into their FNKSTR (zeroed at init) instead of a single code.
+scan_f1:
+    ld   a, 6
+    call SNSMAT
+    and  0x20               ; bit5 low = F1 pressed
+    jr   nz, sf1_up
+    ld   a, (hk_f1)
+    or   a
+    ret  nz                 ; still held from a previous frame -> no repeat
+    ld   a, 1
+    ld   (hk_f1), a
+    jr   do_toggle_r800     ; flip + redraw, then RET to main_loop
+sf1_up:
+    xor  a
+    ld   (hk_f1), a
+    ret
+
+; do_toggle_r800 — flip the CPU session toggle. Silently ignored off turbo R
+; (CHGCPU only exists there). RET-ending so scan_f1 can call it.
+do_toggle_r800:
     ld   a, (msx_version)
     cp   3
-    jp   c, main_loop       ; not a turbo R: CHGCPU does not exist
+    ret  c                  ; not a turbo R: CHGCPU does not exist
     ld   a, (opt_r800)
     xor  1
     ld   (opt_r800), a
     call apply_cpu          ; live: CPU switches now, turbo LED gives feedback
     call draw_status_row
-    jp   main_loop
+    ret
 
 ; apply_cpu — switch the turbo R CPU to match opt_r800 (R800 DRAM or Z80).
 ; Callers must guard for turbo R (CHGCPU only exists there; on other machines
@@ -820,7 +855,7 @@ mjl_found:
 ; "Z80"/"R800" if turbo R), right = "PAG x/y". Everything is rendered into ONE
 ; LINEBUF and flushed ONCE: flush_row_pat writes the whole 256-byte row, so
 ; drawing the parts separately would erase each other. Redrawn from
-; menu_redraw_list and from the '5'/'8' toggle handlers.
+; menu_redraw_list and from the TAB/F1 toggle handlers.
 ;------------------------------------------------------------------------------
 draw_page_indicator:        ; legacy name kept for existing callers
 draw_status_row:
@@ -1024,7 +1059,7 @@ launch_game:
     ld   bc, DIR_ENTRY_SIZE
     ldir
 
-    ; --- turbo R: switch to R800 DRAM if the user toggled it ('8'). ---
+    ; --- turbo R: switch to R800 DRAM if the user toggled it (F1). ---
     ; Called BEFORE di, with page 0 = BIOS: CHGCPU is a normal BIOS call and
     ; only exists on turbo R — the double guard (machine AND toggle) means
     ; MSX1/2/2+ can never reach it (calling it there would crash).
@@ -1093,7 +1128,7 @@ lg_enarsel:
     and  FLAG_SRAM
     call nz, sram_setup
 
-    ; --- 50/60Hz: re-apply the '5' toggle to VDP R#9 AND its BIOS mirror ---
+    ; --- 50/60Hz: re-apply the TAB toggle to VDP R#9 AND its BIOS mirror ---
     ; (also applied live by toggle_hz; re-applied here in case the splash or
     ; a BIOS call touched R#9). Best-effort: games that rewrite R#9 in their
     ; own init will override this. Skipped on MSX1 (no R#9 on the TMS9918).
@@ -3368,7 +3403,7 @@ msg_dashes:
 msg_footer:
     db   " UP/DN  ENTER:launch  RESET:back",0
 
-; Status-row toggle labels ('5' = 50/60Hz on MSX2+, '8' = CPU on turbo R)
+; Status-row toggle labels (TAB = 50/60Hz on MSX2+, F1 = CPU on turbo R)
 msg_hz50:
     db   "50HZ",0
 msg_hz60:
