@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.7.1 — 2026-07-11
+
+GUI redesign only — no launcher, builder or flash-format changes (v1.7 images
+and this build are byte-compatible on the cartridge).
+
+- **Bigger, more readable UI.** Captions that used to render at 9px are now
+  12px; body text and buttons are 15px.
+- **Cleaner main window.** It now shows only the live menu preview (50% larger,
+  centred) and the ROM list. Every setting — marquee, menu title, colours,
+  flash size, boot splash, boot jingle and the background-tile editor — moved
+  to a **⚙ Settings** window opened from the top bar.
+- **Free-space bar moved to the top bar**, to the left of Settings / Build ROM.
+- **Reworked drag-to-reorder.** A six-dot grip handle (drawn, so it never shows
+  as a missing-glyph box), a robust per-row drop zone, and a floating preview
+  of the game title while you drag it.
+- **Uniform ROM rows.** Each row has a fixed full-width background and long
+  filenames are truncated, so the list no longer looks ragged.
+- **Save / Load project stay in the main window** as two buttons; Save is now
+  disabled (not hidden) when the list is empty.
+
 ## v1.7 — 2026-07-11
 
 - **NEW: free-space indicator in the GUI.** A progress bar shows exactly how

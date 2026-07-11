@@ -131,6 +131,7 @@ struct App {
     status: String,
     plan: Option<pack::PackPlan>,   // dry-run of the real allocator (v1.7)
     plan_dirty: bool,
+    show_settings: bool,            // secondary Settings window open (v1.8)
 }
 
 impl Default for App {
@@ -149,6 +150,7 @@ impl Default for App {
             status: String::new(),
             plan: None,
             plan_dirty: true,
+            show_settings: false,
         }
     }
 }
@@ -219,10 +221,15 @@ fn draw_menu_preview(ui: &mut egui::Ui, colors: pack::MenuColors,
     let marq_y = list_top + n_rows as f32 * 8.0 + 4.0;
     let msx_h = marq_y + 8.0 + 1.0;
 
-    // ~25% of the previous full-width size: half the linear scale (quarter area).
-    let scale = (ui.available_width() / MSX_W).clamp(1.0, 3.0) * 0.5;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(MSX_W * scale, msx_h * scale), egui::Sense::hover());
+    // Preview scale, then centered horizontally in the panel (v1.8: 50% larger
+    // than the previous 0.5 factor).
+    let scale = (ui.available_width() / MSX_W).clamp(1.0, 3.0) * 0.75;
+    let w = MSX_W * scale;
+    let h = msx_h * scale;
+    let avail = ui.available_width();
+    let pad = ((avail - w) * 0.5).max(0.0);
+    let (row, _) = ui.allocate_exact_size(egui::vec2(avail, h), egui::Sense::hover());
+    let rect = egui::Rect::from_min_size(row.min + egui::vec2(pad, 0.0), egui::vec2(w, h));
     let painter = ui.painter_at(rect);
     let origin = rect.min;
 
@@ -368,171 +375,28 @@ impl eframe::App for App {
         let overflow = self.plan.as_ref().map_or(false, |p| !p.dropped.is_empty())
             || supported_count > pack::DIR_MAX_ENTRIES;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Header row: title on the left, the big Build ROM button top-right.
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading("MSX Yamanooto nPackR");
-                    ui.label("Build a Yamanooto flash image from your own ROMs.");
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
-                    let big = egui::Button::new(
-                        egui::RichText::new("Build ROM").size(22.0).strong())
-                        .min_size(egui::vec2(180.0, 48.0));
-                    let too_many = supported > pack::DIR_MAX_ENTRIES;
-                    let resp = ui.add_enabled(supported > 0 && !overflow, big)
-                        .on_disabled_hover_text(if too_many {
-                            "Too many games for the directory (max 170) — remove some"
-                        } else if overflow {
-                            "Games don't fit the selected flash — remove some or switch to 8 MB"
-                        } else {
-                            "Add at least one supported ROM"
-                        });
-                    if resp.clicked() {
-                        self.do_build();
-                    }
-                });
+        // Secondary Settings window (v1.8): flash size, boot options, tile
+        // editor. `open` is a local copy so it doesn't borrow self while the
+        // closure below borrows self mutably.
+        let mut open = self.show_settings;
+        egui::Window::new("⚙ Settings")
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(380.0)
+            .default_height(600.0)   // fits all settings without scrolling
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.settings_window(ui));
             });
+        self.show_settings = open;
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.top_bar(ui, overflow);
             ui.separator();
 
-            // SETTINGS
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("SETTINGS").strong()
-                    .color(egui::Color32::from_rgb(255, 204, 102)));
-                ui.horizontal(|ui| {
-                    ui.label("Marquee text:");
-                    ui.add(egui::TextEdit::singleline(&mut self.marquee)
-                        .hint_text("Leave empty for default placeholder")
-                        .desired_width(f32::INFINITY));
-                });
-                ui.label(egui::RichText::new("Max 64 chars. Uppercased automatically. Anti-scam notice is always shown before it.")
-                    .small().color(egui::Color32::GRAY));
-
-                ui.horizontal(|ui| {
-                    ui.label("Menu title: ");
-                    ui.add(egui::TextEdit::singleline(&mut self.title)
-                        .hint_text("Leave empty for default (YAMANOOTO KONAMI COLLECTION)")
-                        .desired_width(f32::INFINITY));
-                });
-                ui.label(egui::RichText::new("Max 31 chars, uppercased. The red title box auto-fits.")
-                    .small().color(egui::Color32::GRAY));
-
-                ui.add_space(4.0);
-                ui.label("Menu colours (MSX palette):");
-                ui.horizontal(|ui| {
-                    color_picker(ui, "col_text", "Text", &mut self.colors.text);
-                    color_picker(ui, "col_bg", "Background", &mut self.colors.bg);
-                    color_picker(ui, "col_box", "Title box", &mut self.colors.box_);
-                });
-                ui.label(egui::RichText::new("Selection bar uses text/background swapped automatically.")
-                    .small().color(egui::Color32::GRAY));
-
-                // Live simulation of how the cart menu will look.
-                ui.add_space(4.0);
-                let prev_title = if self.title.trim().is_empty() {
-                    "YAMANOOTO KONAMI COLLECTION".to_string()
-                } else { self.title.trim().to_uppercase() };
-                let prev_marquee = self.marquee.trim().to_uppercase();
-                let prev_rows: Vec<String> = if self.games.is_empty() {
-                    ["ANTARCTIC ADVENTURE", "GRADIUS 2", "METAL GEAR", "NEMESIS 3", "SALAMANDER"]
-                        .iter().map(|s| s.to_string()).collect()
-                } else {
-                    self.games.iter().take(5).map(|g| g.title.to_uppercase()).collect()
-                };
-                draw_menu_preview(ui, self.colors, &prev_title, &prev_marquee, &prev_rows,
-                                  &self.tile, self.scroll_dir, self.tile_color);
-
-                ui.horizontal(|ui| {
-                    ui.label("Flash size:");
-                    let r1 = ui.radio_value(&mut self.flash_size, FlashSize::Mb2, "2 MB (early units)");
-                    let r2 = ui.radio_value(&mut self.flash_size, FlashSize::Mb8, "8 MB (standard)");
-                    if r1.changed() || r2.changed() { self.plan_dirty = true; }
-                });
-
-                ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
-                ui.checkbox(&mut self.boot_music, "Boot jingle (Konami-style chime)");
-                // The "SCC 512KB alignment (openMSX 21 compat)" checkbox was
-                // removed in v1.7: packing is always sequential (correct on
-                // real hardware, verified). The aligned mode survives in the
-                // Python builder (--scc-align / TOML) for openMSX 21.0 users.
-
-                // 8x8 background tile editor (baked into the launcher; the
-                // menu scrolls it diagonally in the background). All-off =
-                // no tile (classic look).
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Background tile:");
-                    if ui.small_button("Clear").clicked() {
-                        self.tile = [0; 8];
-                    }
-                    ui.label(egui::RichText::new(
-                        if self.tile.iter().all(|&b| b == 0) { "(off)" } else { "(scrolls diagonally behind the menu)" })
-                        .small().color(egui::Color32::GRAY));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Scroll:");
-                    const DIRS: [(u8, &str); 8] = [
-                        (0, "\u{2191} N"), (1, "\u{2197} NE"), (2, "\u{2192} E"),
-                        (3, "\u{2198} SE"), (4, "\u{2193} S"), (5, "\u{2199} SW"),
-                        (6, "\u{2190} W"), (7, "\u{2196} NW"),
-                    ];
-                    let current = DIRS.iter().find(|(d, _)| *d == self.scroll_dir)
-                        .map(|(_, n)| *n).unwrap_or("?");
-                    egui::ComboBox::from_id_source("tile_scroll_dir")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (d, name) in DIRS {
-                                ui.selectable_value(&mut self.scroll_dir, d, name);
-                            }
-                        });
-                    ui.label("Colour:");
-                    let cur_name = if self.tile_color == 0 { "Auto (box colour)" }
-                                   else { msx_color_name(self.tile_color) };
-                    let (crect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                    let shown = if self.tile_color == 0 { self.colors.box_ } else { self.tile_color };
-                    ui.painter().rect_filled(crect, 2.0, msx_color_rgb(shown));
-                    egui::ComboBox::from_id_source("tile_color")
-                        .selected_text(cur_name)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.tile_color, 0, "Auto (box colour)");
-                            for (idx, name) in MSX_PALETTE {
-                                ui.horizontal(|ui| {
-                                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                                    ui.painter().rect_filled(r, 2.0, msx_color_rgb(*idx));
-                                    ui.selectable_value(&mut self.tile_color, *idx, *name);
-                                });
-                            }
-                        });
-                });
-                let cell = 14.0;
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(cell * 8.0, cell * 8.0), egui::Sense::hover());
-                let painter = ui.painter_at(rect);
-                let ink = if self.tile_color == 0 { self.colors.box_ } else { self.tile_color };
-                for row in 0..8usize {
-                    for col in 0..8usize {
-                        let bit = 0x80u8 >> col;
-                        let on = self.tile[row] & bit != 0;
-                        let cr = egui::Rect::from_min_size(
-                            rect.min + egui::vec2(col as f32 * cell, row as f32 * cell),
-                            egui::vec2(cell, cell));
-                        let id = ui.id().with(("tilepx", row, col));
-                        let resp = ui.interact(cr, id, egui::Sense::click());
-                        if resp.clicked() {
-                            self.tile[row] ^= bit;
-                        }
-                        painter.rect_filled(cr.shrink(0.5), 0.0, if on {
-                            msx_color_rgb(ink)
-                        } else {
-                            egui::Color32::from_gray(48)
-                        });
-                        // light grid line so the 8x8 layout reads clearly
-                        painter.rect_stroke(cr, 0.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(110)));
-                    }
-                }
-            });
+            // Main window (v1.8): only the live preview and the ROM list.
+            // Everything else lives in the ⚙ Settings window.
+            self.preview_panel(ui);
 
             ui.add_space(8.0);
 
@@ -550,16 +414,20 @@ impl eframe::App for App {
                             for p in paths { self.add_rom(p); }
                         }
                     }
-                    if !self.games.is_empty() && ui.button("Clear").clicked() {
+                    let has_games = !self.games.is_empty();
+                    if ui.add_enabled(has_games, egui::Button::new("Clear")).clicked() {
                         self.games.clear();
                         self.plan_dirty = true;
                     }
-                    if !self.games.is_empty() && ui.button("Sort A-Z").clicked() {
+                    if ui.add_enabled(has_games, egui::Button::new("Sort A-Z")).clicked() {
                         self.games.sort_by(|a, b|
                             a.title.to_lowercase().cmp(&b.title.to_lowercase()));
                         self.plan_dirty = true;
                     }
-                    if !self.games.is_empty() && ui.button("Save project…").clicked() {
+                    // Save/Load project stay side by side in the main window and
+                    // are always visible; Save is disabled with an empty list.
+                    if ui.add_enabled(has_games, egui::Button::new("Save project…"))
+                        .on_disabled_hover_text("Add at least one ROM first").clicked() {
                         self.save_project();
                     }
                     if ui.button("Load project…").clicked() {
@@ -580,68 +448,94 @@ impl eframe::App for App {
                     let mut mark_dirty = false;
                     egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                         for (idx, g) in self.games.iter_mut().enumerate() {
-                            let row = ui.horizontal(|ui| {
-                                // Drag handle: menu order = list order (v1.7),
-                                // drop a row onto another to reorder.
-                                ui.dnd_drag_source(
-                                    egui::Id::new(("row-drag", idx)), idx, |ui| {
-                                        ui.label(egui::RichText::new("≡")
-                                            .size(16.0).color(egui::Color32::GRAY));
-                                    });
-                                // Title edits do NOT mark the plan dirty: the
-                                // title never affects placement, and recomputing
-                                // (which clones every ROM) on each keystroke would
-                                // stutter with a big collection.
-                                ui.add(egui::TextEdit::singleline(&mut g.title)
-                                    .char_limit(pack::TITLE_MAX_CHARS)
-                                    .desired_width(280.0));
-                                ui.label(egui::RichText::new(
-                                        format!("{}/{}", g.title.chars().count(),
-                                                pack::TITLE_MAX_CHARS))
-                                    .small().color(egui::Color32::DARK_GRAY));
-                                // Mapper is editable per row: an unknown-SHA1 or
-                                // misdetected ROM (e.g. a recent "Enhanced" hack of
-                                // a Konami-SCC game) can be forced by hand. Picking a
-                                // value marks it supported so Build stops skipping it.
-                                let selected_text = g.mapper
-                                    .map(|m| m.short().to_string())
-                                    .unwrap_or_else(|| g.softdb_type.clone());
-                                let sel_color = if g.mapper.is_some() {
-                                    egui::Color32::from_rgb(255, 204, 102)
-                                } else {
-                                    egui::Color32::from_rgb(255, 120, 120)
-                                };
-                                egui::ComboBox::from_id_source(("mapper", idx))
-                                    .selected_text(egui::RichText::new(selected_text)
-                                        .small().color(sel_color))
-                                    .width(104.0)
-                                    .show_ui(ui, |ui| {
-                                        for &choice in MAPPER_CHOICES {
-                                            if ui.selectable_label(false, choice).clicked() {
-                                                apply_mapper_choice(g, choice);
-                                                mark_dirty = true;
+                            let drag_id = egui::Id::new(("row-drag", idx));
+                            let being_dragged = ui.ctx().is_being_dragged(drag_id);
+                            // The whole row is a drop zone (it paints its own
+                            // hover highlight); the ≡ grip on the left is the
+                            // drag source. A filled frame forced to the full
+                            // list width gives every row the SAME background
+                            // block regardless of the filename length.
+                            let row_frame = egui::Frame::none()
+                                .fill(ui.visuals().faint_bg_color)
+                                .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                .rounding(4.0);
+                            let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(
+                                row_frame, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    // Grip: six dots (drawn, so it never depends
+                                    // on a font glyph). While dragging, the
+                                    // floating body also shows the game title so
+                                    // you see what you're moving.
+                                    ui.dnd_drag_source(drag_id, idx, |ui| {
+                                        let (r, _) = ui.allocate_exact_size(
+                                            egui::vec2(14.0, 22.0), egui::Sense::hover());
+                                        let p = ui.painter();
+                                        let col = egui::Color32::from_gray(150);
+                                        for gy in 0..3 {
+                                            for gx in 0..2 {
+                                                p.circle_filled(
+                                                    r.min + egui::vec2(4.0 + gx as f32 * 6.0,
+                                                                       5.0 + gy as f32 * 6.0),
+                                                    1.6, col);
                                             }
                                         }
-                                    });
-                                ui.label(egui::RichText::new(format!("{} KB", g.size / 1024))
-                                    .small().color(egui::Color32::GRAY));
-                                if ui.small_button("✕").clicked() { to_remove = Some(idx); }
+                                        if being_dragged {
+                                            ui.label(egui::RichText::new(g.title.clone())
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(255, 204, 102)));
+                                        }
+                                    }).response.on_hover_cursor(egui::CursorIcon::Grab);
+                                    // Title edits do NOT mark the plan dirty: the
+                                    // title never affects placement, and recomputing
+                                    // (which clones every ROM) on each keystroke would
+                                    // stutter with a big collection.
+                                    ui.add(egui::TextEdit::singleline(&mut g.title)
+                                        .char_limit(pack::TITLE_MAX_CHARS)
+                                        .desired_width(280.0));
+                                    ui.label(egui::RichText::new(
+                                            format!("{}/{}", g.title.chars().count(),
+                                                    pack::TITLE_MAX_CHARS))
+                                        .small().color(egui::Color32::DARK_GRAY));
+                                    // Mapper is editable per row: an unknown-SHA1 or
+                                    // misdetected ROM (e.g. a recent "Enhanced" hack of
+                                    // a Konami-SCC game) can be forced by hand. Picking a
+                                    // value marks it supported so Build stops skipping it.
+                                    let selected_text = g.mapper
+                                        .map(|m| m.short().to_string())
+                                        .unwrap_or_else(|| g.softdb_type.clone());
+                                    let sel_color = if g.mapper.is_some() {
+                                        egui::Color32::from_rgb(255, 204, 102)
+                                    } else {
+                                        egui::Color32::from_rgb(255, 120, 120)
+                                    };
+                                    egui::ComboBox::from_id_source(("mapper", idx))
+                                        .selected_text(egui::RichText::new(selected_text)
+                                            .small().color(sel_color))
+                                        .width(104.0)
+                                        .show_ui(ui, |ui| {
+                                            for &choice in MAPPER_CHOICES {
+                                                if ui.selectable_label(false, choice).clicked() {
+                                                    apply_mapper_choice(g, choice);
+                                                    mark_dirty = true;
+                                                }
+                                            }
+                                        });
+                                    ui.label(egui::RichText::new(format!("{} KB", g.size / 1024))
+                                        .small().color(egui::Color32::GRAY));
+                                    if ui.small_button("✕").clicked() { to_remove = Some(idx); }
+                                });
+                                // Truncate long filenames so they never widen
+                                // the row (keeps every background block equal).
+                                ui.add(egui::Label::new(egui::RichText::new(&g.filename)
+                                    .small().color(egui::Color32::DARK_GRAY)).truncate());
+                                if let Some(why) = &g.unsupported_reason {
+                                    ui.label(egui::RichText::new(format!("  → {}", why))
+                                        .small().color(egui::Color32::from_rgb(255, 120, 120)));
+                                }
                             });
-                            // Row is a drop target for the reorder drag.
-                            if let Some(from) = row.response.dnd_release_payload::<usize>() {
+                            if let Some(from) = dropped {
                                 if *from != idx { move_op = Some((*from, idx)); }
-                            }
-                            if row.response.dnd_hover_payload::<usize>().is_some() {
-                                let r = row.response.rect;
-                                ui.painter().line_segment(
-                                    [r.left_top(), r.right_top()],
-                                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 204, 102)));
-                            }
-                            ui.label(egui::RichText::new(&g.filename)
-                                .small().color(egui::Color32::DARK_GRAY));
-                            if let Some(why) = &g.unsupported_reason {
-                                ui.label(egui::RichText::new(format!("  → {}", why))
-                                    .small().color(egui::Color32::from_rgb(255, 120, 120)));
                             }
                             ui.add_space(2.0);
                         }
@@ -664,48 +558,218 @@ impl eframe::App for App {
                 }
             });
 
-            ui.add_space(8.0);
-
-            // FOOTER — free-space indicator (v1.7): exact dry-run of the real
-            // allocator, so footprints (MG1/MG2 save sectors), sub-placement
-            // and reserved units are all accounted for.
-            let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
-            let skipped = self.games.len() - supported;
+            // The free-space bar moved to the top bar (v1.8). Overflow detail
+            // and the status line stay at the bottom.
             if let Some(plan) = &self.plan {
-                let used_mb = (plan.used_units * pack::OFFR_UNIT) as f64 / (1024.0 * 1024.0);
-                let total_mb = (plan.total_units * pack::OFFR_UNIT) as f64 / (1024.0 * 1024.0);
-                let free_kb = plan.total_units.saturating_sub(plan.used_units) * 32;
-                let frac = plan.used_units as f32 / plan.total_units.max(1) as f32;
-                let fill = if !plan.dropped.is_empty() {
-                    egui::Color32::from_rgb(200, 60, 60)          // red: overflow
-                } else if frac >= 0.8 {
-                    egui::Color32::from_rgb(220, 160, 40)         // amber: filling up
-                } else {
-                    egui::Color32::from_rgb(60, 160, 80)          // green
-                };
-                ui.add(egui::ProgressBar::new(frac.min(1.0))
-                    .fill(fill)
-                    .text(format!("{:.2} MB used / {:.0} MB · {} KB free · {} games ({} skipped)",
-                        used_mb, total_mb, free_kb, supported, skipped)));
                 if !plan.dropped.is_empty() {
+                    ui.add_space(6.0);
                     ui.label(egui::RichText::new(
                             format!("DON'T FIT ({}): {}", plan.dropped.len(),
                                     plan.dropped.join(", ")))
                         .color(egui::Color32::from_rgb(255, 120, 120)));
                 }
-            } else {
-                ui.label(egui::RichText::new(format!(
-                        "{} supported · {} skipped · flash {} MB",
-                        supported, skipped, self.flash_size.bytes() / (1024 * 1024)))
-                    .small().color(egui::Color32::GRAY));
             }
 
             if !self.status.is_empty() {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(&self.status)
-                    .small().color(egui::Color32::LIGHT_GRAY));
+                    .color(egui::Color32::LIGHT_GRAY));
             }
         });
+    }
+}
+
+impl App {
+    /// Top bar: the free-space bar filling the left, then Settings + Build ROM
+    /// pinned to the right.
+    fn top_bar(&mut self, ui: &mut egui::Ui, overflow: bool) {
+        let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
+        let too_many = supported > pack::DIR_MAX_ENTRIES;
+        let mut build_clicked = false;
+        let mut settings_clicked = false;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let big = egui::Button::new(
+                    egui::RichText::new("Build ROM").size(22.0).strong())
+                    .min_size(egui::vec2(160.0, 44.0));
+                let resp = ui.add_enabled(supported > 0 && !overflow, big)
+                    .on_disabled_hover_text(if too_many {
+                        "Too many games for the directory (max 170) — remove some"
+                    } else if overflow {
+                        "Games don't fit the selected flash — remove some or switch to 8 MB"
+                    } else {
+                        "Add at least one supported ROM"
+                    });
+                build_clicked = resp.clicked();
+                if ui.add(egui::Button::new(egui::RichText::new("⚙ Settings").size(14.0))
+                    .min_size(egui::vec2(0.0, 44.0))).clicked() {
+                    settings_clicked = true;
+                }
+                // The bar fills whatever width is left, to the LEFT of the buttons.
+                self.space_bar(ui, ui.available_width().max(120.0));
+            });
+        });
+        if build_clicked { self.do_build(); }
+        if settings_clicked { self.show_settings = !self.show_settings; }
+    }
+
+    /// Free-space bar: dry-run of the REAL allocator (footprints, sub-placement
+    /// and reserved units all counted). Green < 80%, amber ≥ 80%, red on overflow.
+    fn space_bar(&self, ui: &mut egui::Ui, width: f32) {
+        let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
+        let skipped = self.games.len() - supported;
+        let (frac, text, fill) = if let Some(plan) = &self.plan {
+            let used_mb = (plan.used_units * pack::OFFR_UNIT) as f64 / (1024.0 * 1024.0);
+            let total_mb = (plan.total_units * pack::OFFR_UNIT) as f64 / (1024.0 * 1024.0);
+            let free_kb = plan.total_units.saturating_sub(plan.used_units) * 32;
+            let frac = plan.used_units as f32 / plan.total_units.max(1) as f32;
+            let fill = if !plan.dropped.is_empty() {
+                egui::Color32::from_rgb(200, 60, 60)
+            } else if frac >= 0.8 {
+                egui::Color32::from_rgb(220, 160, 40)
+            } else {
+                egui::Color32::from_rgb(60, 160, 80)
+            };
+            (frac.min(1.0),
+             format!("{:.2} / {:.0} MB · {} KB free · {} games ({} skipped)",
+                     used_mb, total_mb, free_kb, supported, skipped),
+             fill)
+        } else {
+            (0.0, format!("empty · flash {} MB", self.flash_size.bytes() / (1024 * 1024)),
+             egui::Color32::from_gray(90))
+        };
+        ui.add_sized([width, 40.0],
+            egui::ProgressBar::new(frac).fill(fill).text(text));
+    }
+
+    /// Main window: live simulation of the cart menu.
+    fn preview_panel(&self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("PREVIEW").strong()
+                .color(egui::Color32::from_rgb(255, 204, 102)));
+            let prev_title = if self.title.trim().is_empty() {
+                "YAMANOOTO KONAMI COLLECTION".to_string()
+            } else { self.title.trim().to_uppercase() };
+            let prev_marquee = self.marquee.trim().to_uppercase();
+            let prev_rows: Vec<String> = if self.games.is_empty() {
+                ["ANTARCTIC ADVENTURE", "GRADIUS 2", "METAL GEAR", "NEMESIS 3", "SALAMANDER"]
+                    .iter().map(|s| s.to_string()).collect()
+            } else {
+                self.games.iter().take(5).map(|g| g.title.to_uppercase()).collect()
+            };
+            draw_menu_preview(ui, self.colors, &prev_title, &prev_marquee, &prev_rows,
+                              &self.tile, self.scroll_dir, self.tile_color);
+        });
+    }
+
+    /// Secondary Settings window (v1.8): ALL settings — marquee, menu title,
+    /// colours, flash size, boot options, tile editor. The main window keeps
+    /// only the preview and the ROM list.
+    fn settings_window(&mut self, ui: &mut egui::Ui) {
+        ui.label("Marquee text:");
+        ui.add(egui::TextEdit::singleline(&mut self.marquee)
+            .hint_text("Leave empty for default placeholder")
+            .desired_width(f32::INFINITY));
+        ui.label(egui::RichText::new("Max 64 chars. Uppercased automatically. Anti-scam notice is always shown before it.")
+            .small().color(egui::Color32::GRAY));
+
+        ui.add_space(4.0);
+        ui.label("Menu title:");
+        ui.add(egui::TextEdit::singleline(&mut self.title)
+            .hint_text("Leave empty for default (YAMANOOTO KONAMI COLLECTION)")
+            .desired_width(f32::INFINITY));
+        ui.label(egui::RichText::new("Max 31 chars, uppercased. The red title box auto-fits.")
+            .small().color(egui::Color32::GRAY));
+
+        ui.add_space(4.0);
+        ui.label("Menu colours (MSX palette):");
+        ui.horizontal(|ui| {
+            color_picker(ui, "col_text", "Text", &mut self.colors.text);
+            color_picker(ui, "col_bg", "Background", &mut self.colors.bg);
+            color_picker(ui, "col_box", "Title box", &mut self.colors.box_);
+        });
+        ui.label(egui::RichText::new("Selection bar uses text/background swapped automatically.")
+            .small().color(egui::Color32::GRAY));
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Flash size:");
+            let r1 = ui.radio_value(&mut self.flash_size, FlashSize::Mb2, "2 MB (early units)");
+            let r2 = ui.radio_value(&mut self.flash_size, FlashSize::Mb8, "8 MB (standard)");
+            if r1.changed() || r2.changed() { self.plan_dirty = true; }
+        });
+        ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
+        ui.checkbox(&mut self.boot_music, "Boot jingle (Konami-style chime)");
+
+        ui.separator();
+        // 8x8 background tile editor (baked into the launcher; the menu scrolls
+        // it diagonally in the background). All-off = no tile (classic look).
+        ui.horizontal(|ui| {
+            ui.label("Background tile:");
+            if ui.small_button("Clear").clicked() { self.tile = [0; 8]; }
+            ui.label(egui::RichText::new(
+                if self.tile.iter().all(|&b| b == 0) { "(off)" } else { "(scrolls diagonally behind the menu)" })
+                .small().color(egui::Color32::GRAY));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Scroll:");
+            const DIRS: [(u8, &str); 8] = [
+                (0, "\u{2191} N"), (1, "\u{2197} NE"), (2, "\u{2192} E"),
+                (3, "\u{2198} SE"), (4, "\u{2193} S"), (5, "\u{2199} SW"),
+                (6, "\u{2190} W"), (7, "\u{2196} NW"),
+            ];
+            let current = DIRS.iter().find(|(d, _)| *d == self.scroll_dir)
+                .map(|(_, n)| *n).unwrap_or("?");
+            egui::ComboBox::from_id_source("tile_scroll_dir")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (d, name) in DIRS {
+                        ui.selectable_value(&mut self.scroll_dir, d, name);
+                    }
+                });
+            ui.label("Colour:");
+            let cur_name = if self.tile_color == 0 { "Auto (box colour)" }
+                           else { msx_color_name(self.tile_color) };
+            let (crect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+            let shown = if self.tile_color == 0 { self.colors.box_ } else { self.tile_color };
+            ui.painter().rect_filled(crect, 2.0, msx_color_rgb(shown));
+            egui::ComboBox::from_id_source("tile_color")
+                .selected_text(cur_name)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.tile_color, 0, "Auto (box colour)");
+                    for (idx, name) in MSX_PALETTE {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().rect_filled(r, 2.0, msx_color_rgb(*idx));
+                            ui.selectable_value(&mut self.tile_color, *idx, *name);
+                        });
+                    }
+                });
+        });
+        let cell = 16.0;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(cell * 8.0, cell * 8.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        let ink = if self.tile_color == 0 { self.colors.box_ } else { self.tile_color };
+        for row in 0..8usize {
+            for col in 0..8usize {
+                let bit = 0x80u8 >> col;
+                let on = self.tile[row] & bit != 0;
+                let cr = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(col as f32 * cell, row as f32 * cell),
+                    egui::vec2(cell, cell));
+                let id = ui.id().with(("tilepx", row, col));
+                let resp = ui.interact(cr, id, egui::Sense::click());
+                if resp.clicked() { self.tile[row] ^= bit; }
+                painter.rect_filled(cr.shrink(0.5), 0.0, if on {
+                    msx_color_rgb(ink)
+                } else {
+                    egui::Color32::from_gray(48)
+                });
+                painter.rect_stroke(cr, 0.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(110)));
+            }
+        }
     }
 }
 
@@ -1085,6 +1149,21 @@ fn install_panic_hook() {
     }));
 }
 
+/// Bump every text style so nothing renders below 12px (the old `.small()`
+/// captions were 9px — "todo se ve muy pequeño"). Body/buttons go to 15px.
+fn configure_text_styles(ctx: &egui::Context) {
+    use egui::{FontFamily::Proportional, FontId, TextStyle};
+    let mut style = (*ctx.style()).clone();
+    style.text_styles = [
+        (TextStyle::Small, FontId::new(12.0, Proportional)),
+        (TextStyle::Body, FontId::new(15.0, Proportional)),
+        (TextStyle::Button, FontId::new(15.0, Proportional)),
+        (TextStyle::Monospace, FontId::new(13.0, egui::FontFamily::Monospace)),
+        (TextStyle::Heading, FontId::new(22.0, Proportional)),
+    ].into();
+    ctx.set_style(style);
+}
+
 fn main() -> Result<(), eframe::Error> {
     install_panic_hook();
     log_line(&format!("=== yamanooto-gui {} startup ===", env!("CARGO_PKG_VERSION")));
@@ -1099,7 +1178,10 @@ fn main() -> Result<(), eframe::Error> {
     let result = eframe::run_native(
         "yamanooto-gui",
         opts,
-        Box::new(|_cc| Ok(Box::<App>::default())),
+        Box::new(|cc| {
+            configure_text_styles(&cc.egui_ctx);
+            Ok(Box::<App>::default())
+        }),
     );
     match &result {
         Ok(()) => log_line("eframe::run_native returned Ok"),
