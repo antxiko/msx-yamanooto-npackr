@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.6 — 2026-07-11
+
+- **Fix: Konami-4 games on real hardware.** K4 titles (Metal Gear, Penguin
+  Adventure, Gradius/Nemesis, …) black-screened on the physical Yamanooto while
+  working in openMSX. Two causes, both addressed:
+  - **The cartridge needs the `ziggy1beta7` FPGA core (or later).** Older cores
+    ignore the K4 mapper selection entirely (the CFGR K4 bit is not even
+    stored) — update with `YAMACORE` and power-cycle. This also un-mutes the
+    Konami Synthesizer (DAC support ships with the newer cores).
+  - **The launcher now drives K4 launches through the official Ziggy
+    master-offset protocol** (offset written to 0x7FFE with `ENAR.MSTEN=1`,
+    mapper OFFR kept at 0, banks primed raw — the same sequence as the official
+    YAMABOOT). The single offset write is also read correctly by openMSX's
+    old-firmware model, so images keep working in the emulator. The launcher
+    init additionally clears both offsets on boot (stale values survive a soft
+    reset on real hardware).
+- **NEW: `probe/` K4-PROBE diagnostic ROM.** A self-contained 128KB probe pair
+  with positional bank signatures and a RAM experiment engine that prints how
+  the cartridge's mapper actually behaves (register readbacks, canonical vs
+  K5 decode, master-offset test, step-by-step trampoline replay). One flash
+  tells an old core from a new one — see `probe/EXPECTED.md`.
+
 ## v1.00 — 2026-07-02
 
 - **NEW: configurable menu colours.** Text, background and title-box colours are
