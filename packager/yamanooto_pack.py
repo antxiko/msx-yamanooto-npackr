@@ -38,8 +38,12 @@ LAUNCHER_SIZE    = LAUNCHER_BANKS * BANK_SIZE   # 32 KB
 DIR_BANK         = 15
 DIR_OFFSET       = DIR_BANK * BANK_SIZE         # 0x01E000
 DIR_HDR_SIZE     = 32
-DIR_ENTRY_SIZE   = 32
-DIR_MAX_ENTRIES  = (BANK_SIZE - DIR_HDR_SIZE) // DIR_ENTRY_SIZE   # 255
+# v1.7 directory format: 48-byte entries (was 32). Name field grew 24 -> 40
+# bytes (max 39 chars + NUL) so titles can span the whole launcher list row.
+DIR_ENTRY_SIZE   = 48
+DIR_NAME_SIZE    = 40
+TITLE_MAX_CHARS  = DIR_NAME_SIZE - 1              # 39
+DIR_MAX_ENTRIES  = (BANK_SIZE - DIR_HDR_SIZE) // DIR_ENTRY_SIZE   # 170
 GAMES_POOL_START = 0x020000        # 128 KB in, first OFFR-aligned slot after dir
 FILL_BYTE        = 0xFF            # erased flash state
 
@@ -286,8 +290,74 @@ CFG_ANCHOR = b"YMNTCFG!"
 CFG_COL_TEXT_OFF = 9   # offsets from the anchor start
 CFG_COL_BG_OFF = 10
 CFG_COL_BOX_OFF = 11
+CFG_SPLASH_OFF = 8     # boot splash flag (anchor + len("YMNTCFG!"))
 CFG_MUSIC_OFF = 12     # boot jingle enable (see launcher.asm cfg_music_enable)
 CFG_TILE_OFF = 13      # 8-byte background tile (launcher.asm cfg_tile)
+CFG_DIR_OFF = 21       # tile scroll direction 0..7 (launcher.asm cfg_scroll_dir)
+CFG_TILECOL_OFF = 22   # tile colour 0..15, 0 = auto/box (launcher.asm cfg_tile_color)
+
+
+def _cfg_anchor_index(data: bytearray, what: str) -> int:
+    idx = data.find(CFG_ANCHOR)
+    if idx < 0:
+        raise RuntimeError(
+            f"{what}: 'YMNTCFG!' config anchor not found in launcher.bin. "
+            "Rebuild it with pasmo from a version that supports this option.")
+    if data.find(CFG_ANCHOR, idx + 1) >= 0:
+        raise RuntimeError(f"{what}: config anchor found more than once in launcher.bin.")
+    return idx
+
+
+def _apply_splash(launcher_bytes: bytes, show) -> bytes:
+    """Patch the boot-splash flag (byte +8). None keeps the launcher default.
+    Twin of the Rust apply_splash_flag (pack.rs)."""
+    if show is None:
+        return launcher_bytes
+    data = bytearray(launcher_bytes)
+    idx = _cfg_anchor_index(data, "show_splash")
+    data[idx + CFG_SPLASH_OFF] = 1 if show else 0
+    return bytes(data)
+
+
+def _apply_tile(launcher_bytes: bytes, tile) -> bytes:
+    """Bake the 8x8 background tile (bytes +13..+20). None keeps the default;
+    otherwise an iterable of exactly 8 ints 0-255 (all-zeros = no tile).
+    Twin of the Rust apply_tile (pack.rs)."""
+    if tile is None:
+        return launcher_bytes
+    rows = list(tile)
+    if len(rows) != 8 or not all(isinstance(r, int) and 0 <= r <= 255 for r in rows):
+        raise RuntimeError("tile: expected exactly 8 integers 0-255 (one per row)")
+    data = bytearray(launcher_bytes)
+    idx = _cfg_anchor_index(data, "tile")
+    data[idx + CFG_TILE_OFF: idx + CFG_TILE_OFF + 8] = bytes(rows)
+    return bytes(data)
+
+
+def _apply_scroll_dir(launcher_bytes: bytes, direction) -> bytes:
+    """Patch the tile scroll direction (byte +21, 0..7). None keeps default.
+    Twin of the Rust apply_scroll_dir (pack.rs)."""
+    if direction is None:
+        return launcher_bytes
+    if not isinstance(direction, int) or not 0 <= direction <= 7:
+        raise RuntimeError(f"scroll_dir: expected 0-7, got {direction!r}")
+    data = bytearray(launcher_bytes)
+    idx = _cfg_anchor_index(data, "scroll_dir")
+    data[idx + CFG_DIR_OFF] = direction
+    return bytes(data)
+
+
+def _apply_tile_color(launcher_bytes: bytes, color) -> bytes:
+    """Patch the tile colour (byte +22; 0 = auto/follow box colour). None keeps
+    the default. Twin of the Rust apply_tile_color (pack.rs)."""
+    if color is None:
+        return launcher_bytes
+    if not isinstance(color, int) or not 0 <= color <= 15:
+        raise RuntimeError(f"tile_color: expected 0-15, got {color!r}")
+    data = bytearray(launcher_bytes)
+    idx = _cfg_anchor_index(data, "tile_color")
+    data[idx + CFG_TILECOL_OFF] = color
+    return bytes(data)
 
 # MSX1 (TMS9918) palette. Index 0 is transparent; menu colours use 1-15.
 MSX_COLORS = {
@@ -406,7 +476,8 @@ class Game:
         return data
 
     def __init__(self, title: str, data: bytes, mapper: str):
-        self.title = title[:23]               # max 23 chars (24 incl NUL)
+        self.title = _sanitize_title(title)   # upper + ASCII + max 39 chars
+        self.menu_index = 0                   # stamped by build_image (menu order)
         self.mapper = mapper
         self.offr = None                      # filled by packer
         self.suboff = 0                       # bits 4-5 of CFGR
@@ -747,23 +818,35 @@ def pack_games(games, *, skip_overflow=False):
     return dropped
 
 
+def _sanitize_title(title: str) -> str:
+    """Uppercase + non-ASCII -> '?' + truncate to 39 chars. Identical to the
+    Rust twin (pack.rs sanitize_title) so both builders emit byte-identical
+    directory names. The launcher font only covers ASCII 0x20-0x5F."""
+    out = "".join(c.upper() if c.isascii() else "?" for c in title)
+    return out[:TITLE_MAX_CHARS]
+
+
 def build_directory(games) -> bytes:
-    """Build the directory bank (8KB) with header + entries."""
+    """Build the directory bank (8KB) with header + entries. Entry order ==
+    menu order (the caller decides; no alphabetical sort since v1.7).
+    v1.7 layout (48B): NAME 0..40 (39 chars + NUL), OFFR 40, SUBOFF 41,
+    FLAGS 42, SIZE32 43, BANKS 44..48."""
     if len(games) > DIR_MAX_ENTRIES:
         raise RuntimeError(f"Too many games ({len(games)}) > {DIR_MAX_ENTRIES}")
     # Header: magic + count + reserved
     hdr = b"YMNT" + struct.pack("<H", len(games)) + b"\x00" * (DIR_HDR_SIZE - 6)
     entries = bytearray()
     for g in games:
-        name = g.title.encode("ascii", errors="replace")[:23]
-        name = name + b"\x00" * (24 - len(name))
+        name = _sanitize_title(g.title).encode("ascii", errors="replace")
+        name = name[:DIR_NAME_SIZE - 1]
+        name = name + b"\x00" * (DIR_NAME_SIZE - len(name))
         entry = bytearray(DIR_ENTRY_SIZE)
-        entry[0:24] = name
-        entry[24]   = g.offr & 0xFF                   # DIR_OFFR
-        entry[25]   = g.suboff & 0x30                 # DIR_SUBOFF (bits 4-5)
-        entry[26]   = g.flags & 0xFF                  # DIR_FLAGS
-        entry[27]   = min(255, g.size_blocks_32k)     # DIR_SIZE32 (informational)
-        entry[28:32] = bytes(g.banks)                  # DIR_BANKS
+        entry[0:DIR_NAME_SIZE] = name
+        entry[40]   = g.offr & 0xFF                   # DIR_OFFR
+        entry[41]   = g.suboff & 0x30                 # DIR_SUBOFF (bits 4-5)
+        entry[42]   = g.flags & 0xFF                  # DIR_FLAGS
+        entry[43]   = min(255, g.size_blocks_32k)     # DIR_SIZE32 (informational)
+        entry[44:48] = bytes(g.banks)                  # DIR_BANKS
         entries += bytes(entry)
     block = hdr + bytes(entries)
     return pad(block, BANK_SIZE)
@@ -775,10 +858,12 @@ def build_image(launcher: bytes, games, *, skip_overflow=False) -> tuple[bytes, 
     if len(launcher) > LAUNCHER_SIZE:
         raise RuntimeError(f"Launcher too big: {len(launcher)} > {LAUNCHER_SIZE}")
     image[LAUNCHER_OFFSET:LAUNCHER_OFFSET + len(launcher)] = launcher
+    # v1.7: menu order = the caller's list order (TOML/GUI manual ordering).
+    # Stamp it BEFORE pack_games reshuffles the list by physical placement.
+    for i, g in enumerate(games):
+        g.menu_index = i
     dropped = pack_games(games, skip_overflow=skip_overflow)
-    # Sort the directory entries alphabetically for the in-cart menu. The
-    # physical placement (g.flash_offset) is independent of menu order.
-    dir_games = sorted(games, key=lambda g: g.title.lower())
+    dir_games = sorted(games, key=lambda g: g.menu_index)
     image[DIR_OFFSET:DIR_OFFSET + BANK_SIZE] = build_directory(dir_games)
     for g in games:
         image[g.flash_offset:g.flash_offset + len(g.data)] = g.data
@@ -836,9 +921,10 @@ def cmd_build(args):
     except ImportError:
         import tomli as tomllib  # type: ignore
 
-    _apply_flash_size(args.flash_size)
     global _scc_strategy, _scc_align
     _scc_strategy = args.scc_strategy
+    # Flash size resolved AFTER reading the TOML (see below); default 8MB.
+    _apply_flash_size(args.flash_size or "8MB")
 
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
@@ -874,6 +960,21 @@ def cmd_build(args):
     # Boot jingle: CLI --no-boot-music overrides TOML [launcher].boot_music.
     boot_music = False if args.no_boot_music else lcfg.get("boot_music")
     launcher_data = _apply_music(launcher_data, boot_music)
+
+    # v1.7 project keys (written by the GUI's "Save project", also hand-
+    # editable): splash flag, background tile + scroll direction + colour.
+    launcher_data = _apply_splash(launcher_data, lcfg.get("show_splash"))
+    launcher_data = _apply_tile(launcher_data, lcfg.get("tile"))
+    launcher_data = _apply_scroll_dir(launcher_data, lcfg.get("scroll_dir"))
+    launcher_data = _apply_tile_color(launcher_data, lcfg.get("tile_color"))
+
+    # v1.7: [launcher].flash_size ("2MB"/"8MB"). Precedence: an explicit
+    # --flash-size (args.flash_size not None) wins; otherwise the TOML value
+    # applies; otherwise the 8MB default set above. (args.flash_size defaults
+    # to None so an explicit flag is unambiguous — the old `"--flash-size" not
+    # in sys.argv` check missed the --flash-size=2MB / abbreviation forms.)
+    if args.flash_size is None and lcfg.get("flash_size") is not None:
+        _apply_flash_size(str(lcfg["flash_size"]))
 
     config_dir = Path(args.config).resolve().parent
     games = []
@@ -943,6 +1044,7 @@ def cmd_test(args):
         g16a, g16b, g16c, g8d,
     ]
 
+    menu_titles = [g.title for g in games]   # insertion order (v1.7 menu order)
     image, dropped = build_image(launcher_data, games)
     assert not dropped, f"dropped in self-test: {[g.title for g in dropped]}"
 
@@ -974,6 +1076,26 @@ def cmd_test(args):
     mirror = image[127 * BANK_SIZE:(127 + 1) * BANK_SIZE]
     assert bytes(mirror) == scc.data[-BANK_SIZE:], "wrap mirror clobbered"
     print("SUBOFF + mirror-unit self-test: 4/4 placements + mirror OK")
+
+    # --- v1.7 directory self-test: 48B entries, menu order, sanitized names ---
+    d = image[DIR_OFFSET:DIR_OFFSET + BANK_SIZE]
+    assert d[0:4] == b"YMNT" and d[4] | (d[5] << 8) == len(games)
+    # Entry order must be the INSERTION order captured before build_image
+    # (pack_games reshuffles `games` by placement; menu_index preserves it).
+    dir_games = sorted(games, key=lambda g: g.menu_index)
+    assert [g.title for g in dir_games] == menu_titles, "menu order lost"
+    for i, g in enumerate(dir_games):
+        e = d[DIR_HDR_SIZE + i * DIR_ENTRY_SIZE:
+              DIR_HDR_SIZE + (i + 1) * DIR_ENTRY_SIZE]
+        name = e[0:DIR_NAME_SIZE].split(b"\x00")[0].decode("ascii")
+        assert name == _sanitize_title(g.title), (name, g.title)
+        assert e[40] == g.offr and e[41] == g.suboff, (g.title, e[40], e[41])
+        assert e[42] == g.flags and tuple(e[44:48]) == tuple(g.banks), g.title
+    # ...and the first entry is the first game ADDED, not the alphabetically
+    # first ("TEST 16K A" would win an A-Z sort over "TEST GAME 1 (SCC)").
+    first = d[DIR_HDR_SIZE:DIR_HDR_SIZE + DIR_NAME_SIZE].split(b"\x00")[0]
+    assert first == _sanitize_title(menu_titles[0]).encode("ascii"), first
+    print(f"directory self-test: {len(games)} entries, 48B layout, menu order OK")
 
     out = here / "test_image.rom"
     out.write_bytes(image)
@@ -1010,7 +1132,7 @@ def _clean_title(filename: str) -> str:
         if idx > 0:
             name = name[:idx]
             break
-    return name.strip()[:23]
+    return name.strip()[:TITLE_MAX_CHARS]
 
 
 # Mapping from openMSX softdb canonical title to short display name.
@@ -1074,8 +1196,8 @@ def _short_title(softdb_title: str, system: str | None = None,
     dumps using the MSX system version when needed (e.g. MSX1 vs MSX2)."""
     base = SHORT_TITLES.get(softdb_title)
     if base is None:
-        return (fallback or softdb_title)[:23]
-    return base[:23]
+        return (fallback or softdb_title)[:TITLE_MAX_CHARS]
+    return base[:TITLE_MAX_CHARS]
 
 
 def _filename_mapper_hint(path: Path) -> str | None:
@@ -1221,9 +1343,10 @@ def main():
     pb = sub.add_parser("build", help="Build full image from TOML config")
     pb.add_argument("config")
     pb.add_argument("-o", "--output", default="yamanooto.rom")
-    pb.add_argument("--flash-size", choices=("2MB", "8MB"), default="8MB",
+    pb.add_argument("--flash-size", choices=("2MB", "8MB"), default=None,
                     help="Target Yamanooto flash size. 8MB is the standard model; "
-                         "2MB exists for some early units. Default: 8MB.")
+                         "2MB exists for some early units. Overrides "
+                         "[launcher].flash_size. Default: 8MB.")
     pb.add_argument("--scc-strategy", choices=("auto", "patch", "mirror", "none"),
                     default="auto",
                     help="How to handle <512K SCC games: auto (patch then mirror), "

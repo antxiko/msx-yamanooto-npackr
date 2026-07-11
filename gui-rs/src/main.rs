@@ -89,6 +89,11 @@ fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
         }
         _ => {}
     }
+    // Remember the exact dropdown token so the project file round-trips: an
+    // ascii8 conversion lands on MapperKind::K5, indistinguishable from a
+    // native k5 — without this, save/load would re-tag it as native k5 and
+    // drop the ASCII8 bank-write patches (silent corruption).
+    g.mapper_choice = if g.mapper.is_some() { Some(choice.to_string()) } else { None };
 }
 
 fn softdb() -> &'static Softdb {
@@ -106,6 +111,10 @@ struct GameEntry {
     data: Vec<u8>,              // bytes to pack (possibly converted)
     unsupported_reason: Option<String>,
     raw: Vec<u8>,              // pristine ROM, for re-converting via the dropdown
+    path: std::path::PathBuf,  // source file, for the project file (v1.7)
+    // Dropdown/conversion token for the project file, when it differs from the
+    // mapper (ascii8 -> K5). None => derive it from `mapper` at save time.
+    mapper_choice: Option<String>,
 }
 
 struct App {
@@ -120,6 +129,8 @@ struct App {
     colors: pack::MenuColors,
     games: Vec<GameEntry>,
     status: String,
+    plan: Option<pack::PackPlan>,   // dry-run of the real allocator (v1.7)
+    plan_dirty: bool,
 }
 
 impl Default for App {
@@ -136,6 +147,8 @@ impl Default for App {
             colors: pack::MenuColors::default(),
             games: Vec::new(),
             status: String::new(),
+            plan: None,
+            plan_dirty: true,
         }
     }
 }
@@ -339,6 +352,22 @@ impl eframe::App for App {
         });
         for p in dropped { self.add_rom(p); }
 
+        // Free-space plan (v1.7): dry-run of the REAL allocator, recomputed
+        // only when the game list / flash size / mappers change.
+        if self.plan_dirty {
+            self.plan = match self.to_pack_games() {
+                Ok(games) if !games.is_empty() =>
+                    Some(pack::plan_games(games, self.flash_size, false)),
+                _ => None,
+            };
+            self.plan_dirty = false;
+        }
+        let supported_count = self.games.iter().filter(|g| g.mapper.is_some()).count();
+        // Blocked either by flash space (plan.dropped) or by the 170-entry
+        // directory-bank cap (build_directory would Err at build time).
+        let overflow = self.plan.as_ref().map_or(false, |p| !p.dropped.is_empty())
+            || supported_count > pack::DIR_MAX_ENTRIES;
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // Header row: title on the left, the big Build ROM button top-right.
             ui.horizontal(|ui| {
@@ -351,7 +380,16 @@ impl eframe::App for App {
                     let big = egui::Button::new(
                         egui::RichText::new("Build ROM").size(22.0).strong())
                         .min_size(egui::vec2(180.0, 48.0));
-                    if ui.add_enabled(supported > 0, big).clicked() {
+                    let too_many = supported > pack::DIR_MAX_ENTRIES;
+                    let resp = ui.add_enabled(supported > 0 && !overflow, big)
+                        .on_disabled_hover_text(if too_many {
+                            "Too many games for the directory (max 170) — remove some"
+                        } else if overflow {
+                            "Games don't fit the selected flash — remove some or switch to 8 MB"
+                        } else {
+                            "Add at least one supported ROM"
+                        });
+                    if resp.clicked() {
                         self.do_build();
                     }
                 });
@@ -407,8 +445,9 @@ impl eframe::App for App {
 
                 ui.horizontal(|ui| {
                     ui.label("Flash size:");
-                    ui.radio_value(&mut self.flash_size, FlashSize::Mb2, "2 MB (early units)");
-                    ui.radio_value(&mut self.flash_size, FlashSize::Mb8, "8 MB (standard)");
+                    let r1 = ui.radio_value(&mut self.flash_size, FlashSize::Mb2, "2 MB (early units)");
+                    let r2 = ui.radio_value(&mut self.flash_size, FlashSize::Mb8, "8 MB (standard)");
+                    if r1.changed() || r2.changed() { self.plan_dirty = true; }
                 });
 
                 ui.checkbox(&mut self.show_splash, "Show boot splash (anti-scam notice)");
@@ -513,6 +552,18 @@ impl eframe::App for App {
                     }
                     if !self.games.is_empty() && ui.button("Clear").clicked() {
                         self.games.clear();
+                        self.plan_dirty = true;
+                    }
+                    if !self.games.is_empty() && ui.button("Sort A-Z").clicked() {
+                        self.games.sort_by(|a, b|
+                            a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                        self.plan_dirty = true;
+                    }
+                    if !self.games.is_empty() && ui.button("Save project…").clicked() {
+                        self.save_project();
+                    }
+                    if ui.button("Load project…").clicked() {
+                        self.load_project();
                     }
                     ui.label(egui::RichText::new("…or drag .rom files into this window")
                         .small().color(egui::Color32::GRAY));
@@ -525,11 +576,29 @@ impl eframe::App for App {
                         .italics().color(egui::Color32::GRAY));
                 } else {
                     let mut to_remove: Option<usize> = None;
+                    let mut move_op: Option<(usize, usize)> = None;
+                    let mut mark_dirty = false;
                     egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                         for (idx, g) in self.games.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
+                            let row = ui.horizontal(|ui| {
+                                // Drag handle: menu order = list order (v1.7),
+                                // drop a row onto another to reorder.
+                                ui.dnd_drag_source(
+                                    egui::Id::new(("row-drag", idx)), idx, |ui| {
+                                        ui.label(egui::RichText::new("≡")
+                                            .size(16.0).color(egui::Color32::GRAY));
+                                    });
+                                // Title edits do NOT mark the plan dirty: the
+                                // title never affects placement, and recomputing
+                                // (which clones every ROM) on each keystroke would
+                                // stutter with a big collection.
                                 ui.add(egui::TextEdit::singleline(&mut g.title)
+                                    .char_limit(pack::TITLE_MAX_CHARS)
                                     .desired_width(280.0));
+                                ui.label(egui::RichText::new(
+                                        format!("{}/{}", g.title.chars().count(),
+                                                pack::TITLE_MAX_CHARS))
+                                    .small().color(egui::Color32::DARK_GRAY));
                                 // Mapper is editable per row: an unknown-SHA1 or
                                 // misdetected ROM (e.g. a recent "Enhanced" hack of
                                 // a Konami-SCC game) can be forced by hand. Picking a
@@ -550,6 +619,7 @@ impl eframe::App for App {
                                         for &choice in MAPPER_CHOICES {
                                             if ui.selectable_label(false, choice).clicked() {
                                                 apply_mapper_choice(g, choice);
+                                                mark_dirty = true;
                                             }
                                         }
                                     });
@@ -557,6 +627,16 @@ impl eframe::App for App {
                                     .small().color(egui::Color32::GRAY));
                                 if ui.small_button("✕").clicked() { to_remove = Some(idx); }
                             });
+                            // Row is a drop target for the reorder drag.
+                            if let Some(from) = row.response.dnd_release_payload::<usize>() {
+                                if *from != idx { move_op = Some((*from, idx)); }
+                            }
+                            if row.response.dnd_hover_payload::<usize>().is_some() {
+                                let r = row.response.rect;
+                                ui.painter().line_segment(
+                                    [r.left_top(), r.right_top()],
+                                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 204, 102)));
+                            }
                             ui.label(egui::RichText::new(&g.filename)
                                 .small().color(egui::Color32::DARK_GRAY));
                             if let Some(why) = &g.unsupported_reason {
@@ -566,26 +646,59 @@ impl eframe::App for App {
                             ui.add_space(2.0);
                         }
                     });
-                    if let Some(idx) = to_remove { self.games.remove(idx); }
+                    if let Some(idx) = to_remove {
+                        self.games.remove(idx);
+                        mark_dirty = true;
+                    }
+                    if let Some((from, to)) = move_op {
+                        // Both indices are into the pre-mutation list. After
+                        // remove(from), targets below `from` shift down by one,
+                        // so a downward move must drop one slot earlier to land
+                        // where the drop line was drawn.
+                        let g = self.games.remove(from);
+                        let to = if from < to { to - 1 } else { to };
+                        self.games.insert(to.min(self.games.len()), g);
+                        mark_dirty = true;
+                    }
+                    if mark_dirty { self.plan_dirty = true; }
                 }
             });
 
             ui.add_space(8.0);
 
-            // FOOTER
-            ui.horizontal(|ui| {
-                let total_kb: usize = self.games.iter()
-                    .filter(|g| g.mapper.is_some())
-                    .map(|g| ((g.size + 32767) / 32768) * 32)
-                    .sum();
-                let flash_kb = self.flash_size.bytes() / 1024;
-                let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
-                ui.label(egui::RichText::new(format!("{} supported · {} skipped · ~{} KB / {} KB",
-                    supported,
-                    self.games.len() - supported,
-                    total_kb, flash_kb))
+            // FOOTER — free-space indicator (v1.7): exact dry-run of the real
+            // allocator, so footprints (MG1/MG2 save sectors), sub-placement
+            // and reserved units are all accounted for.
+            let supported = self.games.iter().filter(|g| g.mapper.is_some()).count();
+            let skipped = self.games.len() - supported;
+            if let Some(plan) = &self.plan {
+                let used_mb = (plan.used_units * pack::OFFR_UNIT) as f64 / (1024.0 * 1024.0);
+                let total_mb = (plan.total_units * pack::OFFR_UNIT) as f64 / (1024.0 * 1024.0);
+                let free_kb = plan.total_units.saturating_sub(plan.used_units) * 32;
+                let frac = plan.used_units as f32 / plan.total_units.max(1) as f32;
+                let fill = if !plan.dropped.is_empty() {
+                    egui::Color32::from_rgb(200, 60, 60)          // red: overflow
+                } else if frac >= 0.8 {
+                    egui::Color32::from_rgb(220, 160, 40)         // amber: filling up
+                } else {
+                    egui::Color32::from_rgb(60, 160, 80)          // green
+                };
+                ui.add(egui::ProgressBar::new(frac.min(1.0))
+                    .fill(fill)
+                    .text(format!("{:.2} MB used / {:.0} MB · {} KB free · {} games ({} skipped)",
+                        used_mb, total_mb, free_kb, supported, skipped)));
+                if !plan.dropped.is_empty() {
+                    ui.label(egui::RichText::new(
+                            format!("DON'T FIT ({}): {}", plan.dropped.len(),
+                                    plan.dropped.join(", ")))
+                        .color(egui::Color32::from_rgb(255, 120, 120)));
+                }
+            } else {
+                ui.label(egui::RichText::new(format!(
+                        "{} supported · {} skipped · flash {} MB",
+                        supported, skipped, self.flash_size.bytes() / (1024 * 1024)))
                     .small().color(egui::Color32::GRAY));
-            });
+            }
 
             if !self.status.is_empty() {
                 ui.add_space(6.0);
@@ -613,16 +726,16 @@ impl App {
         // ASCII8/16 conversion), OR accept an already-patched dump. Either way
         // it enters as the mg1/mg2 mapper so its save footprint is reserved.
         if let Some(patched) = convert::mg1_to_yamanooto(&raw) {
-            self.push_mg(filename, "MG1 → flash saves", MapperKind::Mg1, patched, raw);
+            self.push_mg(filename, "MG1 → flash saves", MapperKind::Mg1, patched, raw, path);
             return;
         }
         if let Some(patched) = convert::mg2_to_yamanooto(&raw) {
-            self.push_mg(filename, "MG2 → flash saves", MapperKind::Mg2, patched, raw);
+            self.push_mg(filename, "MG2 → flash saves", MapperKind::Mg2, patched, raw, path);
             return;
         }
         if let Some(m) = mapper::detect_patched_mg(&raw) {
             let already = raw.clone();
-            self.push_mg(filename, &format!("{} (already patched)", m.short()), m, already, raw);
+            self.push_mg(filename, &format!("{} (already patched)", m.short()), m, already, raw, path);
             return;
         }
 
@@ -631,8 +744,7 @@ impl App {
 
         let (mapper, softdb_type_raw, suggested_title) = match entry {
             Some(e) => {
-                let mut t = e.title.clone();
-                if t.len() > 23 { t = e.title.chars().take(23).collect(); }
+                let t: String = e.title.chars().take(pack::TITLE_MAX_CHARS).collect();
                 (mapper::from_softdb_type(&e.mapper_type), e.mapper_type.clone(), t)
             }
             None => (None, "(unknown SHA1)".into(), strip_known_tags(&filename)),
@@ -670,36 +782,52 @@ impl App {
                     Some(format!("mapper '{}' not supported", st))),
             };
 
+        // Auto-converted ASCII8 lands on K5; remember the token so the project
+        // file round-trips (see apply_mapper_choice). ASCII16 has its own
+        // mapper kind, so it needs no override.
+        let mapper_choice = if softdb_type.starts_with("ASCII8") {
+            Some("ascii8".to_string())
+        } else {
+            None
+        };
         self.games.push(GameEntry {
             filename, title: suggested_title, size, mapper, softdb_type, data, unsupported_reason,
-            raw: raw_pristine,
+            raw: raw_pristine, path, mapper_choice,
         });
+        self.plan_dirty = true;
     }
 
     /// Register a Metal Gear entry (data = the flash-ready image; raw kept so
     /// the mapper dropdown can re-derive it).
     fn push_mg(&mut self, filename: String, tag: &str, mapper: MapperKind,
-               data: Vec<u8>, raw: Vec<u8>) {
+               data: Vec<u8>, raw: Vec<u8>, path: std::path::PathBuf) {
         let title = strip_known_tags(&filename);
         self.games.push(GameEntry {
             filename, title, size: raw.len(), mapper: Some(mapper),
-            softdb_type: tag.to_string(), data, unsupported_reason: None, raw,
+            softdb_type: tag.to_string(), data, unsupported_reason: None, raw, path,
+            mapper_choice: None,   // mg1/mg2 round-trip via mapper_to_project
         });
+        self.plan_dirty = true;
     }
 
-    fn do_build(&mut self) {
-        // Convert UI rows into pack::Game
+    /// GameEntry -> pack::Game for every supported row, in list order. Shared
+    /// by do_build AND the free-space plan so they can never disagree.
+    fn to_pack_games(&self) -> Result<Vec<pack::Game>, String> {
         let mut games = Vec::new();
         for g in &self.games {
             let Some(mapper) = g.mapper else { continue; };
-            match pack::Game::new(g.title.clone(), g.data.clone(), mapper) {
-                Ok(pg) => games.push(pg),
-                Err(e) => {
-                    self.status = format!("Game {:?}: {}", g.title, e);
-                    return;
-                }
-            }
+            games.push(pack::Game::new(g.title.clone(), g.data.clone(), mapper)
+                .map_err(|e| format!("Game {:?}: {}", g.title, e))?);
         }
+        Ok(games)
+    }
+
+    fn do_build(&mut self) {
+        // Convert UI rows into pack::Game (same path as the space indicator)
+        let mut games = match self.to_pack_games() {
+            Ok(g) => g,
+            Err(e) => { self.status = e; return; }
+        };
 
         // Always apply the marquee field: empty -> blank marquee (not the default).
         let marquee_opt = Some(self.marquee.trim());
@@ -740,6 +868,176 @@ impl App {
             }
             Err(e) => self.status = format!("Write failed: {}", e),
         }
+    }
+}
+
+//------------------------------------------------------------------------------
+// Project file (v1.7): the SAME TOML schema the Python CLI consumes, extended
+// with the GUI-only launcher options. plain/k4/k5/scc entries build identically
+// via `yamanooto_pack.py build project.toml`; mg1/mg2/ascii8/ascii16 entries
+// are GUI on-the-fly conversions (the CLI needs pre-converted files for those).
+//------------------------------------------------------------------------------
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ProjectLauncher {
+    file: Option<String>,
+    marquee: Option<String>,
+    title: Option<String>,
+    color_text: Option<u8>,
+    color_bg: Option<u8>,
+    color_box: Option<u8>,
+    boot_music: Option<bool>,
+    show_splash: Option<bool>,
+    flash_size: Option<String>,
+    tile: Option<Vec<u8>>,
+    scroll_dir: Option<u8>,
+    tile_color: Option<u8>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ProjectGame {
+    title: String,
+    file: String,
+    mapper: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Project {
+    launcher: ProjectLauncher,
+    #[serde(default)]
+    games: Vec<ProjectGame>,
+}
+
+/// MapperKind -> the dropdown-choice string that reproduces it on load (all
+/// values are members of MAPPER_CHOICES, so apply_mapper_choice round-trips).
+fn mapper_to_project(m: MapperKind) -> &'static str {
+    match m {
+        MapperKind::Scc => "scc",
+        MapperKind::K5 => "k5",
+        MapperKind::K4 => "k4",
+        MapperKind::Plain => "plain",
+        MapperKind::Ascii16K5 => "ascii16",
+        MapperKind::Mg1 => "mg1",
+        MapperKind::Mg2 => "mg2",
+    }
+}
+
+impl App {
+    fn save_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("npackr-project.toml")
+            .add_filter("TOML project", &["toml"])
+            .save_file() else { return; };
+        let base = path.parent().map(|p| p.to_path_buf());
+        let rel = |p: &std::path::Path| -> String {
+            if let Some(b) = &base {
+                if let Ok(r) = p.strip_prefix(b) {
+                    return r.to_string_lossy().replace('\\', "/");
+                }
+            }
+            p.to_string_lossy().replace('\\', "/")
+        };
+        let proj = Project {
+            launcher: ProjectLauncher {
+                file: Some("launcher/launcher.bin".into()),
+                marquee: Some(self.marquee.clone()),
+                title: if self.title.trim().is_empty() { None }
+                       else { Some(self.title.clone()) },
+                color_text: Some(self.colors.text),
+                color_bg: Some(self.colors.bg),
+                color_box: Some(self.colors.box_),
+                boot_music: Some(self.boot_music),
+                show_splash: Some(self.show_splash),
+                flash_size: Some(match self.flash_size {
+                    FlashSize::Mb2 => "2MB", FlashSize::Mb8 => "8MB" }.into()),
+                tile: Some(self.tile.to_vec()),
+                scroll_dir: Some(self.scroll_dir),
+                tile_color: Some(self.tile_color),
+            },
+            games: self.games.iter().map(|g| ProjectGame {
+                title: g.title.clone(),
+                file: rel(&g.path),
+                // The dropdown token when it differs from the mapper (ascii8),
+                // else derived from the mapper kind.
+                mapper: g.mapper_choice.clone()
+                    .or_else(|| g.mapper.map(|m| mapper_to_project(m).to_string())),
+            }).collect(),
+        };
+        match toml::to_string_pretty(&proj) {
+            Ok(body) => {
+                let text = format!(
+                    "# Yamanooto nPackR project (GUI \"Save project\")\n\
+                     # Reload it with \"Load project\"; plain/k4/k5/scc entries also build via:\n\
+                     #   python packager/yamanooto_pack.py build <this file> -o image.rom\n\n{body}");
+                match std::fs::write(&path, text) {
+                    Ok(_) => self.status = format!("Project saved: {}", path.display()),
+                    Err(e) => self.status = format!("Project save failed: {}", e),
+                }
+            }
+            Err(e) => self.status = format!("Project serialize failed: {}", e),
+        }
+    }
+
+    fn load_project(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("TOML project", &["toml"])
+            .pick_file() else { return; };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => { self.status = format!("Project read failed: {}", e); return; }
+        };
+        let proj: Project = match toml::from_str(&text) {
+            Ok(p) => p,
+            Err(e) => { self.status = format!("Project parse failed: {}", e); return; }
+        };
+        let base = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+
+        let l = proj.launcher;
+        if let Some(v) = l.marquee { self.marquee = v; }
+        if let Some(v) = l.title { self.title = v; }
+        if let Some(v) = l.color_text { if (1..=15).contains(&v) { self.colors.text = v; } }
+        if let Some(v) = l.color_bg { if (1..=15).contains(&v) { self.colors.bg = v; } }
+        if let Some(v) = l.color_box { if (1..=15).contains(&v) { self.colors.box_ = v; } }
+        if let Some(v) = l.boot_music { self.boot_music = v; }
+        if let Some(v) = l.show_splash { self.show_splash = v; }
+        if let Some(v) = l.flash_size {
+            self.flash_size = if v.trim().eq_ignore_ascii_case("2MB")
+                { FlashSize::Mb2 } else { FlashSize::Mb8 };
+        }
+        if let Some(v) = l.tile { if v.len() == 8 { self.tile.copy_from_slice(&v); } }
+        if let Some(v) = l.scroll_dir { if v <= 7 { self.scroll_dir = v; } }
+        if let Some(v) = l.tile_color { if v <= 15 { self.tile_color = v; } }
+
+        self.games.clear();
+        let mut missing: Vec<String> = Vec::new();
+        for pg in proj.games {
+            let p = std::path::Path::new(&pg.file);
+            let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+            let before = self.games.len();
+            if full.exists() { self.add_rom(full); }
+            if self.games.len() == before {
+                missing.push(pg.file.clone());
+                continue;
+            }
+            let idx = self.games.len() - 1;
+            if let Some(want) = &pg.mapper {
+                // Compare against the same token we serialize (mapper_choice
+                // when present, e.g. "ascii8" hiding under K5), so an ASCII8
+                // entry re-runs its converter instead of retagging to native K5.
+                let current = self.games[idx].mapper_choice.clone()
+                    .or_else(|| self.games[idx].mapper.map(|m| mapper_to_project(m).to_string()));
+                if current.as_deref() != Some(want.as_str()) {
+                    apply_mapper_choice(&mut self.games[idx], want);
+                }
+            }
+            self.games[idx].title = pg.title.chars().take(pack::TITLE_MAX_CHARS).collect();
+        }
+        self.plan_dirty = true;
+        self.status = if missing.is_empty() {
+            format!("Project loaded: {} games", self.games.len())
+        } else {
+            format!("Project loaded: {} games — MISSING files: {}",
+                    self.games.len(), missing.join(", "))
+        };
     }
 }
 
@@ -820,6 +1118,8 @@ mod choice_tests {
             mapper: None, softdb_type: "(unknown SHA1)".into(),
             data: raw.clone(), unsupported_reason: Some("mapper not supported".into()),
             raw,
+            path: std::path::PathBuf::from("x.rom"),
+            mapper_choice: None,
         }
     }
 

@@ -15,8 +15,12 @@ pub const LAUNCHER_SIZE: usize = LAUNCHER_BANKS * BANK_SIZE;
 pub const DIR_BANK: usize = 15;
 pub const DIR_OFFSET: usize = DIR_BANK * BANK_SIZE;
 pub const DIR_HDR_SIZE: usize = 32;
-pub const DIR_ENTRY_SIZE: usize = 32;
-pub const DIR_MAX_ENTRIES: usize = (BANK_SIZE - DIR_HDR_SIZE) / DIR_ENTRY_SIZE;
+// v1.7 directory format: 48-byte entries (was 32). Name grew 24 -> 40 bytes
+// so titles can span the whole launcher list row (max 39 chars + NUL).
+pub const DIR_ENTRY_SIZE: usize = 48;
+pub const DIR_NAME_SIZE: usize = 40;
+pub const TITLE_MAX_CHARS: usize = DIR_NAME_SIZE - 1; // 39
+pub const DIR_MAX_ENTRIES: usize = (BANK_SIZE - DIR_HDR_SIZE) / DIR_ENTRY_SIZE; // 170
 pub const GAMES_POOL_START: usize = 0x020000;
 pub const FILL_BYTE: u8 = 0xFF;
 
@@ -69,6 +73,9 @@ pub struct Game {
     pub offr: u8,
     pub suboff: u8,      // CFGR bits 4-5: 8KB offset inside the 32KB OFFR unit
     pub flash_offset: usize,
+    /// Menu position (v1.7): stamped by build_image from the caller's list
+    /// order, survives the placement reshuffle, and decides directory order.
+    pub menu_index: u16,
 }
 
 impl Game {
@@ -109,13 +116,16 @@ impl Game {
             _ => None,
         };
         if needs_wrap_mirror { /* hint already set in struct field */ flags |= 0; }
-        let mut title = title;
-        if title.len() > 23 { title.truncate(23); }
+        // Sanitize like the Python twin: uppercase, non-ASCII -> '?', max 39
+        // chars. Working on chars (not bytes) also fixes the old truncate(23)
+        // panic on a multi-byte boundary.
+        let title = sanitize_title(&title);
         let size_blocks_32k = (((data.len() + OFFR_UNIT - 1) / OFFR_UNIT).min(255)) as u8;
         Ok(Self {
             title, data, mapper, flags, banks, needs_wrap_mirror, size_blocks_32k,
             footprint_units,
             offr: 0, suboff: 0, flash_offset: 0,
+            menu_index: 0,
         })
     }
 
@@ -338,6 +348,16 @@ pub fn plan_games(mut games: Vec<Game>, flash: FlashSize, scc_align: bool) -> Pa
     }
 }
 
+/// Uppercase + non-ASCII -> '?' + truncate to 39 CHARS. Identical to the
+/// Python twin so both builders emit byte-identical directory names. The
+/// launcher font only covers ASCII 0x20-0x5F, hence the fold.
+pub fn sanitize_title(title: &str) -> String {
+    title.chars()
+        .map(|c| if c.is_ascii() { c.to_ascii_uppercase() } else { '?' })
+        .take(TITLE_MAX_CHARS)
+        .collect()
+}
+
 pub fn build_directory(games: &[Game]) -> Result<Vec<u8>, String> {
     if games.len() > DIR_MAX_ENTRIES {
         return Err(format!("Too many games ({}) > {}", games.len(), DIR_MAX_ENTRIES));
@@ -347,17 +367,21 @@ pub fn build_directory(games: &[Game]) -> Result<Vec<u8>, String> {
     out.extend_from_slice(b"YMNT");
     out.extend_from_slice(&(games.len() as u16).to_le_bytes());
     out.resize(DIR_HDR_SIZE, 0);
+    // v1.7 layout (48B): NAME 0..40 (39 chars + NUL), OFFR 40, SUBOFF 41,
+    // FLAGS 42, SIZE32 43, BANKS 44..48. Entry order == menu order (the
+    // caller decides; no alphabetical sort since v1.7).
     for g in games {
         let mut entry = [0u8; DIR_ENTRY_SIZE];
-        let bytes = g.title.as_bytes();
-        let n = bytes.len().min(23);
+        let name = sanitize_title(&g.title); // Game::new already sanitized; be safe
+        let bytes = name.as_bytes();
+        let n = bytes.len().min(DIR_NAME_SIZE - 1);
         entry[..n].copy_from_slice(&bytes[..n]);
-        // 23..24 stays NUL
-        entry[24] = g.offr;
-        entry[25] = g.suboff & 0x30;            // DIR_SUBOFF (bits 4-5)
-        entry[26] = g.flags;
-        entry[27] = g.size_blocks_32k;
-        entry[28..32].copy_from_slice(&g.banks);
+        // rest of the name field stays NUL
+        entry[40] = g.offr;
+        entry[41] = g.suboff & 0x30;            // DIR_SUBOFF (bits 4-5)
+        entry[42] = g.flags;
+        entry[43] = g.size_blocks_32k;
+        entry[44..48].copy_from_slice(&g.banks);
         out.extend_from_slice(&entry);
     }
     // pad bank
@@ -556,13 +580,76 @@ mod title_tests {
         // Sub-placed games keep/get mirrored banks (never map the neighbour).
         assert_eq!(find("TEST 16K A").banks, [0, 1, 0, 1]);
         assert_eq!(find("TEST 8K D").banks, [0, 0, 0, 0]);
-        // The directory encodes suboff at entry byte 25.
-        let mut sorted = games.clone();
-        sorted.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-        let dir = build_directory(&sorted).unwrap();
-        let idx = sorted.iter().position(|g| g.title == "TEST 8K D").unwrap();
+        // The directory encodes suboff at entry byte 41 (v1.7 48-byte layout).
+        let dir = build_directory(&games).unwrap();
+        let idx = games.iter().position(|g| g.title == "TEST 8K D").unwrap();
         let entry = &dir[DIR_HDR_SIZE + idx * DIR_ENTRY_SIZE..];
-        assert_eq!(entry[25], 0x20, "dir entry SUBOFF byte");
+        assert_eq!(entry[41], 0x20, "dir entry SUBOFF byte");
+        assert_eq!(&entry[..9], b"TEST 8K D", "name field starts the entry");
+        assert_eq!(entry[9], 0, "NUL after the name");
+    }
+
+    #[test]
+    fn titles_sanitized_upper_ascii_39() {
+        // uppercase + non-ASCII folded + truncated at a CHAR boundary
+        let t = sanitize_title("Metal Gear — La Venganza de Snake, edición coleccionista");
+        assert!(t.len() <= TITLE_MAX_CHARS);
+        assert_eq!(&t[..10], "METAL GEAR");
+        assert!(t.contains('?'));               // the em-dash folded
+        // multibyte at the cut boundary must not panic (old truncate(23) bug)
+        let long = format!("{}ñ", "A".repeat(38));
+        let t2 = sanitize_title(&long);
+        assert_eq!(t2.chars().count(), 39);
+        assert!(t2.ends_with('?'));
+        // Game::new applies it too
+        let g = Game::new("ping-pong ñ".into(), vec![0; 8192], MapperKind::Plain).unwrap();
+        assert_eq!(g.title, "PING-PONG ?");
+    }
+
+    #[test]
+    fn directory_keeps_menu_order_not_alphabetical() {
+        let launcher = std::fs::read("data/launcher.bin").expect("data/launcher.bin");
+        let mut games = vec![
+            Game::new("ZZZ LAST NAME FIRST SLOT".into(), vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
+            Game::new("AAA FIRST NAME SECOND SLOT".into(), vec![0xC9u8; 16 * 1024], MapperKind::Plain).unwrap(),
+        ];
+        let (image, dropped) = build_image(
+            &launcher, &mut games, FlashSize::Mb8, false, None, None,
+            false, false, &[0u8; 8], 1, 0, MenuColors::default(),
+        ).expect("build_image");
+        assert!(dropped.is_empty());
+        let dir = &image[DIR_OFFSET..DIR_OFFSET + BANK_SIZE];
+        let e0 = &dir[DIR_HDR_SIZE..];
+        let e1 = &dir[DIR_HDR_SIZE + DIR_ENTRY_SIZE..];
+        assert_eq!(&e0[..3], b"ZZZ", "menu order = caller order, not A-Z");
+        assert_eq!(&e1[..3], b"AAA");
+    }
+
+    #[test]
+    fn plan_matches_build_and_counts_units() {
+        // Same synthetic set as suboff_parity: plan_games must agree.
+        fn dummy(size: usize) -> Vec<u8> { vec![0u8; size] }
+        let mk = |t: &str, s: usize, m: MapperKind| Game::new(t.into(), dummy(s), m).unwrap();
+        let games = vec![
+            mk("S", 0x8000, MapperKind::Scc), mk("K", 0x8000, MapperKind::K4),
+            mk("A", 16 * 1024, MapperKind::Plain), mk("B", 16 * 1024, MapperKind::Plain),
+        ];
+        let plan = plan_games(games.clone(), FlashSize::Mb8, true);
+        assert!(plan.dropped.is_empty());
+        assert_eq!(plan.total_units, 256);
+        // 4 reserved + SCC unit16 + mirror unit31 + K4 unit4 + shared unit5
+        assert_eq!(plan.used_units, 8);
+        // MG1 accounts its full footprint (8 units), not just the ROM size
+        let plan_mg1 = plan_games(
+            vec![Game::new("MG1".into(), vec![0; 0x22000], MapperKind::Mg1).unwrap()],
+            FlashSize::Mb8, false);
+        assert_eq!(plan_mg1.used_units, 4 + 8);
+        // Overflow on 2MB: 16 games x 128KB = 2MB > 60 free units -> drops
+        let big: Vec<Game> = (0..16)
+            .map(|i| Game::new(format!("G{i}"), vec![0; 128 * 1024], MapperKind::K4).unwrap())
+            .collect();
+        let plan_2mb = plan_games(big, FlashSize::Mb2, false);
+        assert!(!plan_2mb.dropped.is_empty(), "2MB flash must drop some 128KB games");
     }
 
     // Sequential (scc_align = false): SCC games pack first-fit, mirrors are
@@ -797,14 +884,19 @@ pub fn build_image(
         return Err(format!("Launcher too big: {} > {}", launcher.len(), LAUNCHER_SIZE));
     }
 
+    // v1.7: menu order = the caller's list order (manual ordering). Stamp it
+    // BEFORE pack_games reshuffles the vec by physical placement.
+    for (i, g) in games.iter_mut().enumerate() {
+        g.menu_index = i as u16;
+    }
     let dropped = pack_games(games, flash, scc_align)?;
 
     let mut image = vec![FILL_BYTE; flash.bytes()];
     image[LAUNCHER_OFFSET..LAUNCHER_OFFSET + launcher.len()].copy_from_slice(&launcher);
 
-    let mut sorted = games.clone();
-    sorted.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-    let dir = build_directory(&sorted)?;
+    let mut menu_order = games.clone();
+    menu_order.sort_by_key(|g| g.menu_index);
+    let dir = build_directory(&menu_order)?;
     image[DIR_OFFSET..DIR_OFFSET + BANK_SIZE].copy_from_slice(&dir);
 
     for g in games.iter() {

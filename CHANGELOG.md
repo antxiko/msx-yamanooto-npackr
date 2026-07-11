@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.7 — 2026-07-11
+
+- **NEW: free-space indicator in the GUI.** A progress bar shows exactly how
+  much flash the current list uses — it runs the REAL allocator as a dry run,
+  so MG1/MG2 save-sector footprints, sub-placement of small games and the
+  reserved launcher/directory units are all accounted for. It updates live as
+  you add/remove/reorder ROMs or change the flash size, turns red when games
+  don't fit (listing which ones), and **disables Build** until they do.
+- **NEW: game titles up to 39 characters.** The on-flash directory entry grew
+  from 32 to 48 bytes (name field 24 → 40 bytes), spanning the whole menu row.
+  Titles are edited per row (with a live character counter) and are uppercased/
+  ASCII-folded identically by both builders. Directory capacity is now 170
+  entries (was 255) — still far above any real collection.
+- **NEW: manual menu ordering.** The menu shows games in YOUR order: drag rows
+  by the ≡ handle in the GUI (plus a "Sort A-Z" convenience button), or order
+  the `[[games]]` entries in the TOML for the CLI. The alphabetical auto-sort
+  is gone from both builders.
+- **NEW: save/load builder projects.** "Save project…" writes the full GUI
+  state (ROM paths, titles, mappers, order, colours, tile, marquee, flash
+  size…) as a TOML that "Load project…" restores — and plain/k4/k5/scc entries
+  build identically with the Python CLI from the same file. The CLI gained the
+  matching `[launcher]` keys: `show_splash`, `tile`, `scroll_dir`,
+  `tile_color`, `flash_size`.
+- **NEW: live Z80/R800 toggle.** On a turbo R, pressing '8' in the menu now
+  switches the CPU immediately (the turbo LED follows), same as the live
+  50/60Hz toggle.
+- **Format note:** images built with v1.7 use the 48-byte directory format and
+  embed the matching launcher — reflash the whole image as usual; old images
+  in flash keep working until you do.
+
 ## v1.6 — 2026-07-11
 
 - **Fix: Konami-4 games on real hardware.** K4 titles (Metal Gear, Penguin

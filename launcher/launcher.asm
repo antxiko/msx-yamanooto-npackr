@@ -72,9 +72,9 @@ SCROLL_RATE equ 1           ; frames between 1px marquee advances
 ; Background tile: one shared pattern index per SCREEN 2 third (see bg_remap).
 ; Index 31 is the only index never touched by any flush: the title row flushes
 ; 32..63, the status row 192..223, the marquee row 224..255 (both full-row),
-; and the list rows use the restricted 176-byte flush (cells 0..21). Do NOT
-; use 255 here: flush_marq rewrites the full marquee row every frame and
-; would clobber it.
+; and the list rows use the dynamic mdr_ncells*8 flush, at most cells 0..30
+; (248 bytes) — one byte short of cell 31. Do NOT use 255 here: flush_marq
+; rewrites the full marquee row every frame and would clobber it.
 TILE_IDX   equ 31
 TILE_PAT0  equ PATBASE + TILE_IDX*8            ; 0x00F8
 TILE_PAT1  equ PATBASE + 0x0800 + TILE_IDX*8   ; 0x08F8
@@ -115,15 +115,18 @@ MAP_BANK2 equ 0x9000        ; controls 8000-9FFF
 MAP_BANK3 equ 0xB000        ; controls A000-BFFF
 
 ;------------------------------------------------------------------------------
-; Directory format (32 bytes per entry)
+; Directory format (48 bytes per entry — v1.7, was 32)
+; The name grew from 24 to 40 bytes (max 39 chars + NUL) so titles can span
+; the whole list row (39 chars * 6px from NAME_X=8 ends at pixel 242, safely
+; below the 248 limit of the cell mask in menu_draw_row/hilite_title).
 ;------------------------------------------------------------------------------
-DIR_NAME    equ 0x00        ; 24 bytes, NUL-terminated
-DIR_OFFR    equ 0x18        ; 1 byte: OFFR value (32K units)
-DIR_SUBOFF  equ 0x19        ; 1 byte: SUBOFF in bits 4-5
-DIR_FLAGS   equ 0x1A        ; 1 byte
-DIR_SIZE32  equ 0x1B        ; 1 byte: size in 32K blocks (informational)
-DIR_BANKS   equ 0x1C        ; 4 bytes: bank values for MAP_BANK0..3
-DIR_ENTRY_SIZE equ 32
+DIR_NAME    equ 0x00        ; 40 bytes, NUL-terminated
+DIR_OFFR    equ 0x28        ; 1 byte: OFFR value (32K units)
+DIR_SUBOFF  equ 0x29        ; 1 byte: SUBOFF in bits 4-5
+DIR_FLAGS   equ 0x2A        ; 1 byte
+DIR_SIZE32  equ 0x2B        ; 1 byte: size in 32K blocks (informational)
+DIR_BANKS   equ 0x2C        ; 4 bytes: bank values for MAP_BANK0..3
+DIR_ENTRY_SIZE equ 48
 
 ; DIR_FLAGS bits
 FLAG_K4     equ 0x01
@@ -188,34 +191,34 @@ RAM_BASE      equ 0xE000
 menu_count    equ RAM_BASE + 0    ; 2 bytes
 menu_top      equ RAM_BASE + 2    ; 2 bytes
 menu_cursor   equ RAM_BASE + 4    ; 1 byte
-entry_cache   equ RAM_BASE + 5    ; 32 bytes (DIR_ENTRY_SIZE)
-scroll_offset equ RAM_BASE + 37   ; 1 byte: position in scroll_text
-scroll_ticker equ RAM_BASE + 38   ; 1 byte: frame counter for slowdown
-rl_i          equ RAM_BASE + 39   ; 1 byte: viewport row index during list redraw
-rp_x          equ RAM_BASE + 40   ; 2 bytes: current pixel X for the font blitter
-marq_char     equ RAM_BASE + 42   ; 1 byte: marquee head char index (0..127)
-marq_fine     equ RAM_BASE + 43   ; 1 byte: marquee sub-char pixel offset (0..5)
-box_l         equ RAM_BASE + 44   ; 1 byte: title box left edge (pixel x)
-box_r         equ RAM_BASE + 45   ; 1 byte: title box right edge (pixel x)
-box_lc        equ RAM_BASE + 46   ; 1 byte: box left cell (x>>3)
-box_rc        equ RAM_BASE + 47   ; 1 byte: box right cell (x>>3)
-box_nc        equ RAM_BASE + 48   ; 1 byte: box cell count
-jump_ch       equ RAM_BASE + 49   ; 1 byte: target letter for A-Z jump
-pgbuf         equ RAM_BASE + 50   ; 14 bytes: "PAG x/y" text buffer
-v_col_normal  equ RAM_BASE + 64   ; 1 byte: text row colour  = text<<4 | bg
-v_col_hilite  equ RAM_BASE + 65   ; 1 byte: selection bar    = bg<<4 | text (inverse)
-v_col_box     equ RAM_BASE + 66   ; 1 byte: title box edges   = box<<4 | bg
-sel_index     equ RAM_BASE + 67   ; 2 bytes: directory index of the launched game
+entry_cache   equ RAM_BASE + 5    ; 48 bytes (DIR_ENTRY_SIZE)
+scroll_offset equ RAM_BASE + 53   ; 1 byte: position in scroll_text
+scroll_ticker equ RAM_BASE + 54   ; 1 byte: frame counter for slowdown
+rl_i          equ RAM_BASE + 55   ; 1 byte: viewport row index during list redraw
+rp_x          equ RAM_BASE + 56   ; 2 bytes: current pixel X for the font blitter
+marq_char     equ RAM_BASE + 58   ; 1 byte: marquee head char index (0..127)
+marq_fine     equ RAM_BASE + 59   ; 1 byte: marquee sub-char pixel offset (0..5)
+box_l         equ RAM_BASE + 60   ; 1 byte: title box left edge (pixel x)
+box_r         equ RAM_BASE + 61   ; 1 byte: title box right edge (pixel x)
+box_lc        equ RAM_BASE + 62   ; 1 byte: box left cell (x>>3)
+box_rc        equ RAM_BASE + 63   ; 1 byte: box right cell (x>>3)
+box_nc        equ RAM_BASE + 64   ; 1 byte: box cell count
+jump_ch       equ RAM_BASE + 65   ; 1 byte: target letter for A-Z jump
+pgbuf         equ RAM_BASE + 66   ; 14 bytes: "PAG x/y" text buffer
+v_col_normal  equ RAM_BASE + 80   ; 1 byte: text row colour  = text<<4 | bg
+v_col_hilite  equ RAM_BASE + 81   ; 1 byte: selection bar    = bg<<4 | text (inverse)
+v_col_box     equ RAM_BASE + 82   ; 1 byte: title box edges   = box<<4 | bg
+sel_index     equ RAM_BASE + 83   ; 2 bytes: directory index of the launched game
                                   ; (needed to look up its SRAM-table entry)
-msx_version   equ RAM_BASE + 69   ; 1 byte: BIOS 0x002D cached at boot
-opt_hz        equ RAM_BASE + 70   ; 1 byte: 0 = 50Hz, 1 = 60Hz (session toggle, '5' key)
-opt_r800      equ RAM_BASE + 71   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session toggle, '8' key)
-anim_vphase   equ RAM_BASE + 72   ; 1 byte: tile animation vertical phase (0..7)
-anim_ticker   equ RAM_BASE + 73   ; 1 byte: frame divider for ANIM_RATE
-tile_buf      equ RAM_BASE + 74   ; 8 bytes: rotated tile scratch for anim_tick
-mdr_ncells    equ RAM_BASE + 82   ; 1 byte: text cells of the list/status row being drawn
-anim_hphase   equ RAM_BASE + 83   ; 1 byte: tile animation horizontal phase (0..7)
-dsr_pagcell   equ RAM_BASE + 84   ; 1 byte: first cell of "PAG x/y" (status row remap)
+msx_version   equ RAM_BASE + 85   ; 1 byte: BIOS 0x002D cached at boot
+opt_hz        equ RAM_BASE + 86   ; 1 byte: 0 = 50Hz, 1 = 60Hz (session toggle, '5' key)
+opt_r800      equ RAM_BASE + 87   ; 1 byte: 0 = Z80, 1 = R800 DRAM (session toggle, '8' key)
+anim_vphase   equ RAM_BASE + 88   ; 1 byte: tile animation vertical phase (0..7)
+anim_ticker   equ RAM_BASE + 89   ; 1 byte: frame divider for ANIM_RATE
+tile_buf      equ RAM_BASE + 90   ; 8 bytes: rotated tile scratch for anim_tick
+mdr_ncells    equ RAM_BASE + 98   ; 1 byte: text cells of the list/status row being drawn
+anim_hphase   equ RAM_BASE + 99   ; 1 byte: tile animation horizontal phase (0..7)
+dsr_pagcell   equ RAM_BASE + 100  ; 1 byte: first cell of "PAG x/y" (status row remap)
 
 ; Scanline pattern buffer. For the marquee it is used as: 8-byte left guard
 ; cell (rendered but NOT blitted -> left clip) + 256 visible bytes + 8 slack.
@@ -413,8 +416,23 @@ toggle_r800:
     ld   a, (opt_r800)
     xor  1
     ld   (opt_r800), a
+    call apply_cpu          ; live: CPU switches now, turbo LED gives feedback
     call draw_status_row
     jp   main_loop
+
+; apply_cpu — switch the turbo R CPU to match opt_r800 (R800 DRAM or Z80).
+; Callers must guard for turbo R (CHGCPU only exists there; on other machines
+; the call would crash). Normal BIOS call — page 0 = BIOS in both caller
+; contexts (menu loop and launch_game before di). Bit 7 makes the BIOS drive
+; the turbo LED to match the mode.
+apply_cpu:
+    ld   a, (opt_r800)
+    or   a
+    ld   a, 0x80            ; Z80 + LED update (off)
+    jr   z, apply_cpu_go
+    ld   a, 0x82            ; R800 DRAM + LED update (on)
+apply_cpu_go:
+    jp   CHGCPU
 
 do_launch:
     call menu_get_selected  ; HL = pointer to selected entry in RAM
@@ -481,7 +499,7 @@ dir_get_entry:
     push bc
     ld   hl, 0
     ld   de, DIR_ENTRY_SIZE
-    ; multiply BC * 32 -> HL (entries fit in 13 bits since cap is 4096)
+    ; multiply BC * DIR_ENTRY_SIZE (48) -> HL (cap is 170 entries, well within 16 bits)
 dir_get_entry_mul:
     ld   a, b
     or   c
@@ -604,7 +622,7 @@ mdr_empty:
     ; N = ceil(rp_x/8) text cells; everything right of the text is handed to
     ; the shared background tile (mdr_nt), so titles do not "print black"
     ; past their own width.
-    ld   a, (rp_x)          ; text end pixel (fits in the low byte: max 146)
+    ld   a, (rp_x)          ; text end pixel (low byte; max 242 for a 39-char title, < 256)
     add  a, 7
     rrca
     rrca
@@ -1000,7 +1018,8 @@ P_ENARSEL    equ TRAMP_PARAMS + 7   ; 1 byte: ENAR value for the OFFR write
                                     ; launch_game to keep the trampoline small)
 
 launch_game:
-    ; HL -> entry in paged-in flash (0xA000+). Copy 32 bytes to RAM cache.
+    ; HL -> entry in paged-in flash (0xA000+). Copy the entry (DIR_ENTRY_SIZE
+    ; = 48 bytes) to the RAM cache.
     ld   de, entry_cache
     ld   bc, DIR_ENTRY_SIZE
     ldir
@@ -1012,11 +1031,7 @@ launch_game:
     ld   a, (msx_version)
     cp   3
     jr   c, lg_no_r800
-    ld   a, (opt_r800)
-    or   a
-    jr   z, lg_no_r800
-    ld   a, 0x82            ; bits1-0 = 10 (R800 DRAM) + bit7 (turbo LED)
-    call CHGCPU
+    call apply_cpu          ; re-assert the toggle (both directions) at launch
 lg_no_r800:
 
     di
