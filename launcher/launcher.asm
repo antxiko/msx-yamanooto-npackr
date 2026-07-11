@@ -377,8 +377,34 @@ toggle_hz:
     ld   a, (opt_hz)
     xor  1
     ld   (opt_hz), a
+    call apply_hz           ; live: the menu itself switches 50/60 right away
+    ei                      ; apply_hz leaves interrupts off
     call draw_status_row
     jp   main_loop
+
+; apply_hz — program VDP R#9 bit1 (NT) and its BIOS mirror from opt_hz.
+; Callers guard for MSX2+ (no R#9 on the TMS9918). RG9SAV must be updated
+; too or the BIOS reverts R#9 on the next screen change. Returns with
+; interrupts DISABLED: the two OUTs must be atomic (a KEYINT status read
+; between them resets the VDP's byte latch). launch_game stays DI after
+; this; toggle_hz re-enables.
+apply_hz:
+    ld   a, (RG9SAV)
+    and  0xFD               ; clear bit1 (NT)
+    ld   b, a
+    ld   a, (opt_hz)
+    or   a                  ; 0 = 50Hz -> NT=1, 1 = 60Hz -> NT=0
+    ld   a, 2
+    jr   z, apply_hz_set
+    xor  a
+apply_hz_set:
+    or   b
+    ld   (RG9SAV), a
+    di
+    out  (0x99), a          ; data byte
+    ld   a, 0x80 | 9
+    out  (0x99), a          ; write register 9
+    ret
 
 toggle_r800:
     ld   a, (msx_version)
@@ -1052,28 +1078,14 @@ lg_enarsel:
     and  FLAG_SRAM
     call nz, sram_setup
 
-    ; --- 50/60Hz: apply the '5' toggle to VDP R#9 AND its BIOS mirror ---
-    ; RG9SAV must be updated too or the BIOS reverts R#9 on the next screen
-    ; change. Best-effort v1: games that rewrite R#9 in their own init will
-    ; override this. Skipped on MSX1 (no R#9 on the TMS9918).
+    ; --- 50/60Hz: re-apply the '5' toggle to VDP R#9 AND its BIOS mirror ---
+    ; (also applied live by toggle_hz; re-applied here in case the splash or
+    ; a BIOS call touched R#9). Best-effort: games that rewrite R#9 in their
+    ; own init will override this. Skipped on MSX1 (no R#9 on the TMS9918).
+    ; We are already DI; apply_hz keeps it that way.
     ld   a, (msx_version)
     or   a
-    jr   z, lg_no_hz
-    ld   a, (RG9SAV)
-    and  0xFD               ; clear bit1 (NT)
-    ld   b, a
-    ld   a, (opt_hz)
-    or   a                  ; 0 = 50Hz -> NT=1, 1 = 60Hz -> NT=0
-    ld   a, 2
-    jr   z, lg_hz_set
-    xor  a
-lg_hz_set:
-    or   b
-    ld   (RG9SAV), a
-    out  (0x99), a          ; data byte (interrupts are off: pair is atomic)
-    ld   a, 0x80 | 9
-    out  (0x99), a          ; write register 9
-lg_no_hz:
+    call nz, apply_hz
 
     ; Copy trampoline code to RAM
     ld   hl, trampoline_src
