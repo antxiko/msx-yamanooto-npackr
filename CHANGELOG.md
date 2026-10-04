@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.7.5 — 2026-10-04
+
+- **ESC leaves the Galious load menu** (both `galious` and `galious_enhanced`).
+  With no slot used there was no way out of it but switching off (reported on
+  real hardware): the game's typing screen has no exit and the menu replaces
+  it. ESC now goes back to the title the way the game leaves its demo (state
+  0, step 0). The menu says "1 2 OR 3  ESC EXIT"; on the original Galious it
+  also blanks the game's middle line, which showed between the menu's.
+  Tested in openMSX, also inside a pack (Galious launched from the menu).
+
 ## v1.7.4 — 2026-10-04
 
 - **The Maze of Galious Enhanced saves to the cartridge flash too.** bladeba's
