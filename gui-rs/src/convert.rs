@@ -1,5 +1,5 @@
 // Ports of packager/ascii8_to_k5.py, ascii16_to_k5.py,
-// mg1_to_yamanooto.py and mg2_to_yamanooto.py.
+// mg1_to_yamanooto.py, mg2_to_yamanooto.py and galious_to_yamanooto.py.
 
 /// Bank-F virtual-tape driver + shim for Metal Gear 1 (built from
 /// mg1_driver.asm / mg1_shim.asm). Kept in sync by the forensic gate.
@@ -7,6 +7,10 @@ const MG1_DRIVER: &[u8] = include_bytes!("../../launcher/mg1_driver.bin");
 const MG1_SHIM: &[u8] = include_bytes!("../../launcher/mg1_shim.bin");
 /// GM2-shaped flash save driver for Metal Gear 2 (built from mg2_driver.asm).
 const MG2_DRIVER: &[u8] = include_bytes!("../../launcher/mg2_driver.bin");
+/// 3-slot flash save driver + shim for The Maze of Galious (built from
+/// galious_driver.asm / galious_shim.asm).
+const GALIOUS_DRIVER: &[u8] = include_bytes!("../../launcher/galious_driver.bin");
+const GALIOUS_SHIM: &[u8] = include_bytes!("../../launcher/galious_shim.bin");
 
 // --- Metal Gear 1: redirect the 20 cassette BIOS calls to bank-F stubs ------
 // (routine label, ROM offset of the CD opcode, BIOS vector). Mirrors the SITES
@@ -53,6 +57,47 @@ pub fn mg1_to_yamanooto(rom: &[u8]) -> Option<Vec<u8>> {
     }
     out[MG1_SHIM_OFFSET..MG1_SHIM_OFFSET + MG1_SHIM.len()].copy_from_slice(MG1_SHIM);
     out.extend_from_slice(MG1_DRIVER);
+    Some(out)
+}
+
+// --- The Maze of Galious: password room + typing screen -> 3 flash slots ---
+// (ROM offset, original bytes, new bytes). Mirrors the SITES table in
+// galious_to_yamanooto.py: bank 2 runs at 0x8000, so ROM = 0x4000 + (CPU -
+// 0x8000). The new bytes call the stubs at 0xBF93 / 0xBF98 / 0xBF9D (shim).
+const GALIOUS_SITES: &[(usize, &[u8], &[u8])] = &[
+    // p02:90F5 password room, YES: message 15 + password -> password + save menu
+    (0x50F5, &[0x3E, 0x0F, 0xCD, 0xEF, 0x94, 0xCD, 0xA0, 0x95],
+             &[0xCD, 0xA0, 0x95, 0xCD, 0x93, 0xBF, 0x00, 0x00]),
+    // p02:910D password room, step 2: button A -> keys 1/2/3 save
+    (0x510D, &[0x3A, 0x08, 0xE0, 0xE6, 0x10, 0xC8],
+             &[0xCD, 0x98, 0xBF, 0x00, 0x00, 0xC8]),
+    // p02:9716 typing screen (state 0x12) -> load menu
+    (0x5716, &[0xCD, 0x57, 0x97, 0xCD, 0x6F, 0x97, 0xCD, 0x22, 0x97, 0xC3, 0xAF, 0x97],
+             &[0xC3, 0x9D, 0xBF, 0xCD, 0x6F, 0x97, 0xCD, 0x22, 0x97, 0xC3, 0xAF, 0x97]),
+];
+const GALIOUS_SHIM_OFFSET: usize = 0x7F93;   // bank 3 free 0xFF tail (CPU 0xBF93)
+const GALIOUS_SHIM_END: usize = 0x7FF0;      // up to the Konami mark at 0xBFF0
+
+/// Is this a RAW (unpatched) Maze of Galious ROM we can convert? 128KB, the
+/// three patched sites hold their original bytes, and the shim area is 0xFF.
+pub fn is_raw_galious(rom: &[u8]) -> bool {
+    if rom.len() != 0x20000 { return false; }
+    if !rom[GALIOUS_SHIM_OFFSET..GALIOUS_SHIM_END].iter().all(|&b| b == 0xFF) { return false; }
+    GALIOUS_SITES.iter().all(|&(off, old, _)| rom.get(off..off + old.len()) == Some(old))
+}
+
+/// Patch a raw Galious ROM for Yamanooto flash saves (3 slots instead of the
+/// password): repoint the 3 sites at the bank-3 stubs, install the shim,
+/// append the 8KB driver as relative bank 0x10. Returns the 0x22000-byte
+/// image, or None if `rom` isn't a convertible raw Galious.
+pub fn galious_to_yamanooto(rom: &[u8]) -> Option<Vec<u8>> {
+    if !is_raw_galious(rom) { return None; }
+    let mut out = rom.to_vec();
+    for &(off, _, new) in GALIOUS_SITES {
+        out[off..off + new.len()].copy_from_slice(new);
+    }
+    out[GALIOUS_SHIM_OFFSET..GALIOUS_SHIM_OFFSET + GALIOUS_SHIM.len()].copy_from_slice(GALIOUS_SHIM);
+    out.extend_from_slice(GALIOUS_DRIVER);
     Some(out)
 }
 
@@ -197,6 +242,34 @@ mod mg_tests {
         // a random 128KB blob must NOT be mistaken for MG1
         assert!(!is_raw_mg1(&vec![0u8; 0x20000]));
         assert!(mg1_to_yamanooto(&vec![0u8; 0x20000]).is_none());
+    }
+
+    #[test]
+    fn galious_patch_repoints_sites_and_appends_driver() {
+        let mut raw = vec![0u8; 0x20000];
+        raw[0] = b'A'; raw[1] = b'B';
+        for &(off, old, _) in GALIOUS_SITES {
+            raw[off..off + old.len()].copy_from_slice(old);
+        }
+        for b in &mut raw[GALIOUS_SHIM_OFFSET..GALIOUS_SHIM_END] { *b = 0xFF; }
+        assert!(is_raw_galious(&raw));
+        let out = galious_to_yamanooto(&raw).expect("convertible");
+        assert_eq!(out.len(), 0x22000, "128KB game + 8KB driver");
+        // password room YES -> call hace_la_contrasena + call stub 0xBF93
+        assert_eq!(&out[0x50F5..0x50FB], &[0xCD, 0xA0, 0x95, 0xCD, 0x93, 0xBF]);
+        // typing screen -> jp stub 0xBF9D
+        assert_eq!(&out[0x5716..0x5719], &[0xC3, 0x9D, 0xBF]);
+        assert_eq!(&out[GALIOUS_SHIM_OFFSET..GALIOUS_SHIM_OFFSET + GALIOUS_SHIM.len()],
+                   GALIOUS_SHIM);
+        assert_eq!(&out[0x20000..], GALIOUS_DRIVER);
+        assert_eq!(super::super::mapper::detect_patched_mg(&out),
+                   Some(super::super::mapper::MapperKind::Galious));
+        // a patched ROM is not raw any more; a random blob is neither
+        assert!(!is_raw_galious(&out[..0x20000]));
+        assert!(galious_to_yamanooto(&vec![0u8; 0x20000]).is_none());
+        // an MG1-shaped ROM is never taken for Galious (and vice versa)
+        assert!(!is_raw_galious(&fake_raw_mg1()));
+        assert!(!is_raw_mg1(&raw));
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub enum MapperKind {
     Ascii16K5, // patched ASCII16 (needs RAM helper — not packable here yet)
     Mg1,       // Metal Gear 1 patched by mg1_to_yamanooto.py (K4 + flash saves)
     Mg2,       // Metal Gear 2 patched by mg2_to_yamanooto.py (SCC + flash saves)
+    Galious,   // The Maze of Galious patched by galious_to_yamanooto.py (K4 + 3
+               // flash save slots; same layout as Mg1)
 }
 
 impl MapperKind {
@@ -21,6 +23,7 @@ impl MapperKind {
             MapperKind::Ascii16K5 => "ascii16_k5",
             MapperKind::Mg1 => "mg1",
             MapperKind::Mg2 => "mg2",
+            MapperKind::Galious => "galious",
         }
     }
 }
@@ -32,12 +35,18 @@ impl MapperKind {
 ///   0x1FB9A repointed at the bank-F stub 0xBFA7 (CD A7 BF).
 /// - MG2: 512KB game + 8KB driver, and the GM2-detection patch at 0x5DD4
 ///   (3A 99 C3 = LD A,(0xC399)).
+/// - Galious: 128KB game + 8KB driver, and the password room at ROM 0x50F5
+///   calling hace_la_contrasena then the save-menu stub (CD A0 95 CD 93 BF).
 pub fn detect_patched_mg(rom: &[u8]) -> Option<MapperKind> {
     if rom.len() == 0x22000 && rom.get(0x1FB9A..0x1FB9D) == Some(&[0xCD, 0xA7, 0xBF][..]) {
         return Some(MapperKind::Mg1);
     }
     if rom.len() == 0x82000 && rom.get(0x5DD4..0x5DD7) == Some(&[0x3A, 0x99, 0xC3][..]) {
         return Some(MapperKind::Mg2);
+    }
+    if rom.len() == 0x22000
+        && rom.get(0x50F5..0x50FB) == Some(&[0xCD, 0xA0, 0x95, 0xCD, 0x93, 0xBF][..]) {
+        return Some(MapperKind::Galious);
     }
     None
 }

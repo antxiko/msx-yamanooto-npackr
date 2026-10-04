@@ -92,6 +92,9 @@ MAPPER_MG2         = 'mg2'         # Metal Gear 2 patched by mg2_to_yamanooto.py
 MAPPER_MG1         = 'mg1'         # Metal Gear 1 patched by mg1_to_yamanooto.py —
                                     # Konami-4 + appended virtual-tape driver bank +
                                     # one 64KB save sector at relative bank 0x18.
+MAPPER_GALIOUS     = 'galious'     # The Maze of Galious patched by
+                                    # galious_to_yamanooto.py — same layout as mg1
+                                    # (K4 + driver bank 0x10 + sector at 0x18).
 
 # -----------------------------------------------------------------------------
 # Mapper auto-detection via openMSX softwaredb (SHA1 -> mapper type)
@@ -555,13 +558,15 @@ class Game:
             # in absolute flash. (Was 3x64KB=768KB before the append rewrite.)
             self.banks = (0, 1, 2, 3)
             self.footprint_units = 20
-        elif mapper == MAPPER_MG1:
+        elif mapper in (MAPPER_MG1, MAPPER_GALIOUS):
             # Metal Gear 1, patched by mg1_to_yamanooto.py (128KB K4 ROM +
             # 8KB virtual-tape driver at relative bank 0x10). Its cassette
             # save/load is redirected to ONE 64KB sector at relative bank
             # 0x18 (banks 0x18-0x1F, left 0xFF here). Footprint = 256KB
             # (8 units), placed at an even OFFR so the sector stays
             # 64KB-aligned in absolute flash. Plain K4 launch (no helper).
+            # The Maze of Galious (galious_to_yamanooto.py) has the very same
+            # layout: 128KB K4 game + slots driver at 0x10 + sector at 0x18.
             self.banks = (0, 1, 2, 3)
             self.flags = FLAG_K4
             self.footprint_units = 8
@@ -646,9 +651,10 @@ def pack_games(games, *, skip_overflow=False):
     # Partition games
     scc_games  = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2)]
     sram_games = [g for g in games
-                  if g.sram_type is not None or g.mapper == MAPPER_MG1]
+                  if g.sram_type is not None or g.mapper in (MAPPER_MG1, MAPPER_GALIOUS)]
     non_scc    = [g for g in games
-                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2, MAPPER_MG1)
+                  if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2, MAPPER_MG1,
+                                      MAPPER_GALIOUS)
                   and g.sram_type is None]
 
     # Sort SCC games by size descending (place biggest first to avoid fragmentation).
@@ -1096,6 +1102,18 @@ def cmd_test(args):
     first = d[DIR_HDR_SIZE:DIR_HDR_SIZE + DIR_NAME_SIZE].split(b"\x00")[0]
     assert first == _sanitize_title(menu_titles[0]).encode("ascii"), first
     print(f"directory self-test: {len(games)} entries, 48B layout, menu order OK")
+
+    # --- galious self-test: same layout as mg1 (K4, 256KB footprint, even
+    # OFFR, driver at relative bank 0x10, 64KB save sector 0x18-0x1F blank) ---
+    gal_data = make_dummy_game(0x20000) + bytes([0x5A]) * BANK_SIZE
+    gal = Game("TEST GALIOUS", gal_data, MAPPER_GALIOUS)
+    gimage, gdropped = build_image(launcher_data, [gal])
+    assert not gdropped and gal.flags == FLAG_K4 and gal.footprint_units == 8
+    assert gal.offr % 2 == 0, gal.offr
+    gbase = gal.offr * 4 * BANK_SIZE
+    assert gimage[gbase + 0x10 * BANK_SIZE:gbase + 0x11 * BANK_SIZE] == bytes([0x5A]) * BANK_SIZE
+    assert set(gimage[gbase + 0x18 * BANK_SIZE:gbase + 0x20 * BANK_SIZE]) == {0xFF}
+    print(f"galious self-test: OFFR=0x{gal.offr:02X} driver@0x10 sector@0x18 blank OK")
 
     out = here / "test_image.rom"
     out.write_bytes(image)

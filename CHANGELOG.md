@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.7.3 — 2026-10-04
+
+- **The Maze of Galious saves to the cartridge flash.** 3 save slots instead of
+  the password: in the password room, after YES, keys 1/2/3 save; on the title
+  screen, L shows the slots and 1/2/3 load (the game checks the loaded password
+  with its own sum). New mapper `galious` (same layout as `mg1`: Konami-4 game +
+  8KB driver at relative bank 0x10 + one 64KB sector at 0x18, even OFFR). The
+  GUI patches the raw 128KB dump (RC749) on drop, or accepts an already-patched
+  one; `packager/galious_to_yamanooto.py` is the CLI twin (byte-identical, see
+  `gui-rs/examples/mg_parity.rs`). Tested in openMSX and on real hardware
+  (a real MSX with a Yamanooto).
+  No launcher or flash-format change.
+
 ## v1.7.2 — 2026-07-11
 
 - **Launcher toggle keys remapped.** In the in-cart menu, **TAB** now switches

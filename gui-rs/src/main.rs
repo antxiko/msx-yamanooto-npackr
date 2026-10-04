@@ -36,7 +36,7 @@ const FONT6X8: &[u8] = include_bytes!("../data/font6x8.bin");
 // re-tags (ROM packed as-is, only CFGR/bank setup differs). ascii8/ascii16 run
 // the converter on the raw ROM, so ASCII games whose SHA1 is not in the softdb
 // can still be forced through — same result as the CLI --auto-convert.
-const MAPPER_CHOICES: &[&str] = &["scc", "k5", "k4", "plain", "ascii8", "ascii16", "mg1", "mg2"];
+const MAPPER_CHOICES: &[&str] = &["scc", "k5", "k4", "plain", "ascii8", "ascii16", "mg1", "mg2", "galious"];
 
 fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
     g.unsupported_reason = None;
@@ -65,6 +65,17 @@ fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
             } else {
                 g.mapper = None;
                 g.unsupported_reason = Some("Not a Metal Gear 2 ROM (need the 512KB GoodMSX dump)".into());
+            }
+        }
+        // galious: same idea, 3 flash save slots instead of the password.
+        "galious" => {
+            if let Some(p) = convert::galious_to_yamanooto(&g.raw) {
+                g.data = p; g.mapper = Some(MapperKind::Galious);
+            } else if mapper::detect_patched_mg(&g.raw) == Some(MapperKind::Galious) {
+                g.data = g.raw.clone(); g.mapper = Some(MapperKind::Galious);
+            } else {
+                g.mapper = None;
+                g.unsupported_reason = Some("Not The Maze of Galious (need the 128KB RC749 dump)".into());
             }
         }
         "ascii8" => {
@@ -786,15 +797,20 @@ impl App {
         };
         let size = raw.len();
 
-        // Metal Gear 1 / 2: patch the RAW ROM for flash saves on the fly (like
-        // ASCII8/16 conversion), OR accept an already-patched dump. Either way
-        // it enters as the mg1/mg2 mapper so its save footprint is reserved.
+        // Metal Gear 1 / 2 and The Maze of Galious: patch the RAW ROM for flash
+        // saves on the fly (like ASCII8/16 conversion), OR accept an already-
+        // patched dump. Either way it enters as the mg1/mg2/galious mapper so
+        // its save footprint is reserved.
         if let Some(patched) = convert::mg1_to_yamanooto(&raw) {
             self.push_mg(filename, "MG1 → flash saves", MapperKind::Mg1, patched, raw, path);
             return;
         }
         if let Some(patched) = convert::mg2_to_yamanooto(&raw) {
             self.push_mg(filename, "MG2 → flash saves", MapperKind::Mg2, patched, raw, path);
+            return;
+        }
+        if let Some(patched) = convert::galious_to_yamanooto(&raw) {
+            self.push_mg(filename, "Galious → flash saves", MapperKind::Galious, patched, raw, path);
             return;
         }
         if let Some(m) = mapper::detect_patched_mg(&raw) {
@@ -982,6 +998,7 @@ fn mapper_to_project(m: MapperKind) -> &'static str {
         MapperKind::Ascii16K5 => "ascii16",
         MapperKind::Mg1 => "mg1",
         MapperKind::Mg2 => "mg2",
+        MapperKind::Galious => "galious",
     }
 }
 

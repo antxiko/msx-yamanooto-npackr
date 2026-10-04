@@ -18,7 +18,8 @@ Download the latest [release](https://github.com/antxiko/msx-yamanooto-npackr/re
 launch the binary, drag-and-drop your ROMs, set a marquee + flash size, click
 **Build ROM**. No Python or other deps required. Raw Metal Gear 1 / Metal Gear 2
 dumps are auto-patched on the fly so they **save to the cartridge flash** (no
-cassette, no Game Master 2 needed).
+cassette, no Game Master 2 needed), and so is The Maze of Galious (3 save slots
+instead of the password).
 
 > **⚠ Cartridge core requirement.** Konami-4 games (Metal Gear, Penguin
 > Adventure, Gradius/Nemesis, …), native ASCII8/16 and the PCM DAC
@@ -63,8 +64,9 @@ run it. Nothing else to install — no Python, no runtime.
 
 **Add your ROMs.** Drag `.rom` files into the window, or use **Add ROM files…**.
 The builder identifies each game by its SHA1 against openMSX's database and picks
-the right mapper automatically. Metal Gear 1 and 2 are patched on the fly so they
-can save to the cartridge; ASCII8/ASCII16 games are converted automatically.
+the right mapper automatically. Metal Gear 1 and 2 and The Maze of Galious are
+patched on the fly so they can save to the cartridge; ASCII8/ASCII16 games are
+converted automatically.
 
 **Review the list.** Each row shows:
 
@@ -139,6 +141,13 @@ Not every dump works: the patcher only accepts the dumps it knows. If yours is
 rejected, check [`docs/METAL_GEAR_SRAM_COMPAT.md`](docs/METAL_GEAR_SRAM_COMPAT.md)
 for the list of compatible ones.
 
+**The Maze of Galious saves to 3 slots in the cartridge flash** instead of
+showing a password. In the password room, after YES, press **1**, **2** or **3**
+to save; on the title screen, **L** shows the 3 slots, press 1/2/3 to load. It
+also reserves a 64 KB sector. Only the known 128 KB dump (RC749) is accepted;
+patch from the disassembly
+[antxiko/MazeOfGalious-disassembly](https://github.com/antxiko/MazeOfGalious-disassembly).
+
 ## 6. Troubleshooting
 
 | Symptom | Cause |
@@ -177,9 +186,9 @@ ejecútalo. No hay nada más que instalar: ni Python, ni librerías.
 
 **Añade tus ROMs.** Arrastra los ficheros `.rom` a la ventana, o usa **Add ROM
 files…**. El builder identifica cada juego por su SHA1 contra la base de datos de
-openMSX y elige el mapper solo. Metal Gear 1 y 2 se parchean al vuelo para que
-puedan grabar en el cartucho, y los juegos ASCII8/ASCII16 se convierten
-automáticamente.
+openMSX y elige el mapper solo. Metal Gear 1 y 2 y The Maze of Galious se
+parchean al vuelo para que puedan grabar en el cartucho, y los juegos
+ASCII8/ASCII16 se convierten automáticamente.
 
 **Revisa la lista.** Cada fila tiene:
 
@@ -255,6 +264,13 @@ No vale cualquier volcado: el parcheador solo acepta los que conoce. Si te
 rechaza el tuyo, mira la lista de compatibles en
 [`docs/METAL_GEAR_SRAM_COMPAT.md`](docs/METAL_GEAR_SRAM_COMPAT.md).
 
+**The Maze of Galious graba en 3 huecos de la flash** en vez de enseñar la
+contraseña. En la sala de la contraseña, tras YES, pulsa **1**, **2** o **3**
+para grabar; en el título, **L** enseña los 3 huecos y 1/2/3 carga. También
+reserva un sector de 64 KB. Solo acepta el volcado conocido de 128 KB (RC749);
+el parche sale del desensamblado
+[antxiko/MazeOfGalious-disassembly](https://github.com/antxiko/MazeOfGalious-disassembly).
+
 ## 6. Problemas frecuentes
 
 | Síntoma | Causa |
@@ -283,6 +299,7 @@ and flash an image — for that, the manual above is enough.*
 | `packager/ascii8_to_k5.py` | Stand-alone ASCII8 → K5 converter (the GUI does this in memory). |
 | `packager/ascii16_to_k5.py` | Stand-alone ASCII16 → K5 converter (the GUI does this in memory). |
 | `packager/mg1_to_yamanooto.py` / `mg2_to_yamanooto.py` | Metal Gear 1 / 2 patchers: redirect cassette / Game Master 2 saves to a 64KB flash sector on the cartridge (the GUI applies them automatically to raw dumps). |
+| `packager/galious_to_yamanooto.py` | The Maze of Galious patcher: 3 save slots in a 64KB flash sector instead of the password (`mapper = "galious"`, same layout as `mg1`; the GUI applies it automatically to the raw dump). |
 | `probe/` | **K4-PROBE diagnostic ROM**: prints how the cartridge's mapper really behaves (register readbacks, K4 vs K5 decode, master offset). One flash distinguishes an old FPGA core from a current one. See `probe/EXPECTED.md`. |
 | `catalog/konami_catalog.toml` | Reference list of Konami MSX cartridge dumps with their mappers (informational). |
 

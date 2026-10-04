@@ -107,11 +107,11 @@ impl Game {
             }
             // Patched Metal Gears carry their own flash-save driver + one
             // 64KB sector inside a fixed footprint (see the Python packer).
-            MapperKind::Mg1 => (FLAG_K4, [0,1,2,3], false, data),
+            MapperKind::Mg1 | MapperKind::Galious => (FLAG_K4, [0,1,2,3], false, data),
             MapperKind::Mg2 => (0, [0,1,2,3], false, data),
         };
         let footprint_units = match mapper {
-            MapperKind::Mg1 => Some(8),   // 128KB game + 8KB driver + pad + 64KB sector
+            MapperKind::Mg1 | MapperKind::Galious => Some(8),   // 128KB game + 8KB driver + pad + 64KB sector
             MapperKind::Mg2 => Some(20),  // 512KB game + 8KB driver + pad + 64KB sector
             _ => None,
         };
@@ -175,7 +175,7 @@ pub fn pack_games_with_stats(games: &mut Vec<Game>, flash: FlashSize, scc_align:
         .partition(|g| matches!(g.mapper,
             MapperKind::Scc | MapperKind::Ascii16K5 | MapperKind::Mg2));
     let (mut mg1, mut non_scc): (Vec<Game>, Vec<Game>) = rest.into_iter()
-        .partition(|g| matches!(g.mapper, MapperKind::Mg1));
+        .partition(|g| matches!(g.mapper, MapperKind::Mg1 | MapperKind::Galious));
 
     scc.sort_by(|a, b| b.data.len().cmp(&a.data.len()));
     mg1.sort_by(|a, b| b.data.len().cmp(&a.data.len()));
@@ -236,8 +236,9 @@ pub fn pack_games_with_stats(games: &mut Vec<Game>, flash: FlashSize, scc_align:
         }
     }
 
-    // MG1: even-aligned slots so its 64KB save sector (relative bank 0x18)
-    // stays 64KB-aligned in absolute flash. Mirrors the Python SRAM pass.
+    // MG1 (and Galious, same layout): even-aligned slots so the 64KB save
+    // sector (relative bank 0x18) stays 64KB-aligned in absolute flash.
+    // Mirrors the Python SRAM pass.
     for g in mg1 {
         let span = g.footprint_units.unwrap_or_else(|| g.size_offr());
         let mut slot: Option<Game> = Some(g);
@@ -677,6 +678,25 @@ mod title_tests {
         assert_eq!(find("K4 32K").offr, 16);
         // the 16K game fills the first mirror unit (256K's mirror = unit 19)
         assert_eq!((find("P 16K").offr, find("P 16K").suboff), (19, 0x00));
+    }
+
+    #[test]
+    fn galious_takes_the_mg1_footprint_on_an_even_offr() {
+        // Galious output = 128KB game + 8KB driver, like MG1. Placed after a
+        // 32KB K4 game it must still start on an even OFFR (sector aligned).
+        let mut games = vec![
+            Game::new("K4 32K".into(), vec![0u8; 32 * 1024], MapperKind::K4).unwrap(),
+            Game::new("GALIOUS".into(), vec![0u8; 0x22000], MapperKind::Galious).unwrap(),
+        ];
+        assert_eq!(games[1].footprint_units, Some(8));
+        assert_eq!(games[1].flags, FLAG_K4);
+        let dropped = pack_games(&mut games, FlashSize::Mb2, false).unwrap();
+        assert!(dropped.is_empty());
+        let gal = games.iter().find(|g| g.title == "GALIOUS").unwrap();
+        assert_eq!(gal.offr % 2, 0);
+        let k4 = games.iter().find(|g| g.title == "K4 32K").unwrap();
+        let (a, b) = (gal.offr as usize, k4.offr as usize);
+        assert!(b < a || b >= a + 8, "K4 game inside Galious' 8-unit footprint");
     }
 
     #[test]
