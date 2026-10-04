@@ -11,6 +11,10 @@ const MG2_DRIVER: &[u8] = include_bytes!("../../launcher/mg2_driver.bin");
 /// galious_driver.asm / galious_shim.asm).
 const GALIOUS_DRIVER: &[u8] = include_bytes!("../../launcher/galious_driver.bin");
 const GALIOUS_SHIM: &[u8] = include_bytes!("../../launcher/galious_shim.bin");
+/// The same for The Maze of Galious Enhanced (galious_enhanced_driver.asm /
+/// galious_enhanced_shim.asm).
+const GALIOUS_ENH_DRIVER: &[u8] = include_bytes!("../../launcher/galious_enhanced_driver.bin");
+const GALIOUS_ENH_SHIM: &[u8] = include_bytes!("../../launcher/galious_enhanced_shim.bin");
 
 // --- Metal Gear 1: redirect the 20 cassette BIOS calls to bank-F stubs ------
 // (routine label, ROM offset of the CD opcode, BIOS vector). Mirrors the SITES
@@ -98,6 +102,54 @@ pub fn galious_to_yamanooto(rom: &[u8]) -> Option<Vec<u8>> {
     }
     out[GALIOUS_SHIM_OFFSET..GALIOUS_SHIM_OFFSET + GALIOUS_SHIM.len()].copy_from_slice(GALIOUS_SHIM);
     out.extend_from_slice(GALIOUS_DRIVER);
+    Some(out)
+}
+
+// --- The Maze of Galious Enhanced (bladeba v1.04, KonamiSCC 512KB) ---------
+// Same three sites as Galious, moved inside the Enhanced's bank 2. Mirrors
+// galious_enhanced_to_yamanooto.py. Nothing is appended: the shim goes in the
+// bank 3 tail the Enhanced blanks with 0x00 (CPU 0xBE65-0xBFFF, nothing points
+// there) and the driver in bank 0x0C (8KB of 0xFF, mapped but never read).
+const GALIOUS_ENH_SITES: &[(usize, &[u8], &[u8])] = &[
+    // p02:8EB9 password room, YES: message 15 + password -> password + save menu
+    (0x4EB9, &[0x3E, 0x0F, 0xCD, 0xD1, 0x92, 0xCD, 0x92, 0x93],
+             &[0xCD, 0x92, 0x93, 0xCD, 0x80, 0xBE, 0x00, 0x00]),
+    // p02:8ED1 password room, step 2: button A -> keys 1/2/3 save
+    (0x4ED1, &[0x3A, 0x08, 0xE0, 0xE6, 0x10, 0xC8],
+             &[0xCD, 0x85, 0xBE, 0x00, 0x00, 0xC8]),
+    // p02:9510 typing screen (state 0x12) -> load menu
+    (0x5510, &[0xCD, 0x59, 0x95, 0xCD, 0x71, 0x95, 0xCD, 0x1A, 0x95, 0xC9],
+             &[0xC3, 0x8A, 0xBE, 0xCD, 0x71, 0x95, 0xCD, 0x1A, 0x95, 0xC9]),
+];
+const GALIOUS_ENH_TAIL: (usize, usize) = (0x7E65, 0x8000);   // blanked with 0x00
+const GALIOUS_ENH_SHIM_OFFSET: usize = 0x7E80;              // CPU 0xBE80
+const GALIOUS_ENH_DRIVER_OFFSET: usize = 0x0C * 0x2000;     // bank 0x0C, all 0xFF
+
+/// Is this a RAW (unpatched) Galious Enhanced ROM we can convert? 512KB, the
+/// three sites hold their original bytes, the bank 3 tail is 0x00 and bank
+/// 0x0C is 0xFF.
+pub fn is_raw_galious_enhanced(rom: &[u8]) -> bool {
+    if rom.len() != 0x80000 { return false; }
+    if !rom[GALIOUS_ENH_TAIL.0..GALIOUS_ENH_TAIL.1].iter().all(|&b| b == 0x00) { return false; }
+    if !rom[GALIOUS_ENH_DRIVER_OFFSET..GALIOUS_ENH_DRIVER_OFFSET + 0x2000].iter().all(|&b| b == 0xFF) {
+        return false;
+    }
+    GALIOUS_ENH_SITES.iter().all(|&(off, old, _)| rom.get(off..off + old.len()) == Some(old))
+}
+
+/// Patch a raw Galious Enhanced ROM for Yamanooto flash saves (3 slots instead
+/// of the password). Returns the 512KB image (same size), or None if `rom`
+/// isn't a convertible raw Galious Enhanced.
+pub fn galious_enhanced_to_yamanooto(rom: &[u8]) -> Option<Vec<u8>> {
+    if !is_raw_galious_enhanced(rom) { return None; }
+    let mut out = rom.to_vec();
+    for &(off, _, new) in GALIOUS_ENH_SITES {
+        out[off..off + new.len()].copy_from_slice(new);
+    }
+    out[GALIOUS_ENH_SHIM_OFFSET..GALIOUS_ENH_SHIM_OFFSET + GALIOUS_ENH_SHIM.len()]
+        .copy_from_slice(GALIOUS_ENH_SHIM);
+    out[GALIOUS_ENH_DRIVER_OFFSET..GALIOUS_ENH_DRIVER_OFFSET + 0x2000]
+        .copy_from_slice(GALIOUS_ENH_DRIVER);
     Some(out)
 }
 
@@ -270,6 +322,35 @@ mod mg_tests {
         // an MG1-shaped ROM is never taken for Galious (and vice versa)
         assert!(!is_raw_galious(&fake_raw_mg1()));
         assert!(!is_raw_mg1(&raw));
+    }
+
+    #[test]
+    fn galious_enhanced_patch_repoints_sites_and_fills_bank_0c() {
+        let mut raw = vec![0x11u8; 0x80000];
+        for &(off, old, _) in GALIOUS_ENH_SITES {
+            raw[off..off + old.len()].copy_from_slice(old);
+        }
+        for b in &mut raw[GALIOUS_ENH_TAIL.0..GALIOUS_ENH_TAIL.1] { *b = 0x00; }
+        for b in &mut raw[GALIOUS_ENH_DRIVER_OFFSET..GALIOUS_ENH_DRIVER_OFFSET + 0x2000] { *b = 0xFF; }
+        assert!(is_raw_galious_enhanced(&raw));
+        let out = galious_enhanced_to_yamanooto(&raw).expect("convertible");
+        assert_eq!(out.len(), 0x80000, "same 512KB: nothing appended");
+        // password room YES -> call hace_la_contrasena + call stub 0xBE80
+        assert_eq!(&out[0x4EB9..0x4EBF], &[0xCD, 0x92, 0x93, 0xCD, 0x80, 0xBE]);
+        // typing screen -> jp stub 0xBE8A
+        assert_eq!(&out[0x5510..0x5513], &[0xC3, 0x8A, 0xBE]);
+        assert_eq!(&out[GALIOUS_ENH_SHIM_OFFSET..GALIOUS_ENH_SHIM_OFFSET + GALIOUS_ENH_SHIM.len()],
+                   GALIOUS_ENH_SHIM);
+        assert_eq!(&out[GALIOUS_ENH_DRIVER_OFFSET..GALIOUS_ENH_DRIVER_OFFSET + 0x2000],
+                   GALIOUS_ENH_DRIVER);
+        // everything else untouched
+        assert_eq!(&out[0x60000..], &raw[0x60000..]);
+        assert_eq!(super::super::mapper::detect_patched_mg(&out),
+                   Some(super::super::mapper::MapperKind::GaliousEnhanced));
+        assert!(!is_raw_galious_enhanced(&out));
+        assert!(galious_enhanced_to_yamanooto(&vec![0u8; 0x80000]).is_none());
+        // the original Galious and an MG2-sized blob are never taken for it
+        assert!(galious_enhanced_to_yamanooto(&vec![0u8; 0x20000]).is_none());
     }
 
     #[test]

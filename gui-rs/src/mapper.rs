@@ -11,6 +11,9 @@ pub enum MapperKind {
     Mg2,       // Metal Gear 2 patched by mg2_to_yamanooto.py (SCC + flash saves)
     Galious,   // The Maze of Galious patched by galious_to_yamanooto.py (K4 + 3
                // flash save slots; same layout as Mg1)
+    GaliousEnhanced, // The Maze of Galious Enhanced (bladeba v1.04, KonamiSCC
+               // 512KB) patched by galious_enhanced_to_yamanooto.py: driver
+               // inside (bank 0x0C), 3 flash save slots at relative bank 0x40
 }
 
 impl MapperKind {
@@ -24,6 +27,7 @@ impl MapperKind {
             MapperKind::Mg1 => "mg1",
             MapperKind::Mg2 => "mg2",
             MapperKind::Galious => "galious",
+            MapperKind::GaliousEnhanced => "galious_enhanced",
         }
     }
 }
@@ -37,6 +41,8 @@ impl MapperKind {
 ///   (3A 99 C3 = LD A,(0xC399)).
 /// - Galious: 128KB game + 8KB driver, and the password room at ROM 0x50F5
 ///   calling hace_la_contrasena then the save-menu stub (CD A0 95 CD 93 BF).
+/// - Galious Enhanced: 512KB (driver inside), and the password room at ROM
+///   0x4EB9 calling hace_la_contrasena then the save-menu stub (CD 92 93 CD 80 BE).
 pub fn detect_patched_mg(rom: &[u8]) -> Option<MapperKind> {
     if rom.len() == 0x22000 && rom.get(0x1FB9A..0x1FB9D) == Some(&[0xCD, 0xA7, 0xBF][..]) {
         return Some(MapperKind::Mg1);
@@ -47,6 +53,10 @@ pub fn detect_patched_mg(rom: &[u8]) -> Option<MapperKind> {
     if rom.len() == 0x22000
         && rom.get(0x50F5..0x50FB) == Some(&[0xCD, 0xA0, 0x95, 0xCD, 0x93, 0xBF][..]) {
         return Some(MapperKind::Galious);
+    }
+    if rom.len() == 0x80000
+        && rom.get(0x4EB9..0x4EBF) == Some(&[0xCD, 0x92, 0x93, 0xCD, 0x80, 0xBE][..]) {
+        return Some(MapperKind::GaliousEnhanced);
     }
     None
 }

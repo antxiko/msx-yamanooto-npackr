@@ -36,7 +36,7 @@ const FONT6X8: &[u8] = include_bytes!("../data/font6x8.bin");
 // re-tags (ROM packed as-is, only CFGR/bank setup differs). ascii8/ascii16 run
 // the converter on the raw ROM, so ASCII games whose SHA1 is not in the softdb
 // can still be forced through — same result as the CLI --auto-convert.
-const MAPPER_CHOICES: &[&str] = &["scc", "k5", "k4", "plain", "ascii8", "ascii16", "mg1", "mg2", "galious"];
+const MAPPER_CHOICES: &[&str] = &["scc", "k5", "k4", "plain", "ascii8", "ascii16", "mg1", "mg2", "galious", "galious_enhanced"];
 
 fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
     g.unsupported_reason = None;
@@ -76,6 +76,16 @@ fn apply_mapper_choice(g: &mut GameEntry, choice: &str) {
             } else {
                 g.mapper = None;
                 g.unsupported_reason = Some("Not The Maze of Galious (need the 128KB RC749 dump)".into());
+            }
+        }
+        "galious_enhanced" => {
+            if let Some(p) = convert::galious_enhanced_to_yamanooto(&g.raw) {
+                g.data = p; g.mapper = Some(MapperKind::GaliousEnhanced);
+            } else if mapper::detect_patched_mg(&g.raw) == Some(MapperKind::GaliousEnhanced) {
+                g.data = g.raw.clone(); g.mapper = Some(MapperKind::GaliousEnhanced);
+            } else {
+                g.mapper = None;
+                g.unsupported_reason = Some("Not The Maze of Galious Enhanced (need the v1.04 IPS applied to RC749)".into());
             }
         }
         "ascii8" => {
@@ -813,6 +823,10 @@ impl App {
             self.push_mg(filename, "Galious → flash saves", MapperKind::Galious, patched, raw, path);
             return;
         }
+        if let Some(patched) = convert::galious_enhanced_to_yamanooto(&raw) {
+            self.push_mg(filename, "Galious Enhanced → flash saves", MapperKind::GaliousEnhanced, patched, raw, path);
+            return;
+        }
         if let Some(m) = mapper::detect_patched_mg(&raw) {
             let already = raw.clone();
             self.push_mg(filename, &format!("{} (already patched)", m.short()), m, already, raw, path);
@@ -999,6 +1013,7 @@ fn mapper_to_project(m: MapperKind) -> &'static str {
         MapperKind::Mg1 => "mg1",
         MapperKind::Mg2 => "mg2",
         MapperKind::Galious => "galious",
+        MapperKind::GaliousEnhanced => "galious_enhanced",
     }
 }
 

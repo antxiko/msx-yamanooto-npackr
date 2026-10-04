@@ -109,10 +109,13 @@ impl Game {
             // 64KB sector inside a fixed footprint (see the Python packer).
             MapperKind::Mg1 | MapperKind::Galious => (FLAG_K4, [0,1,2,3], false, data),
             MapperKind::Mg2 => (0, [0,1,2,3], false, data),
+            // Galious Enhanced: native KonamiSCC, full 512KB (no wrap mirror).
+            MapperKind::GaliousEnhanced => (0, [0,1,2,3], false, data),
         };
         let footprint_units = match mapper {
             MapperKind::Mg1 | MapperKind::Galious => Some(8),   // 128KB game + 8KB driver + pad + 64KB sector
             MapperKind::Mg2 => Some(20),  // 512KB game + 8KB driver + pad + 64KB sector
+            MapperKind::GaliousEnhanced => Some(18),  // 512KB game (driver inside) + 64KB sector
             _ => None,
         };
         if needs_wrap_mirror { /* hint already set in struct field */ flags |= 0; }
@@ -173,7 +176,8 @@ pub fn pack_games_with_stats(games: &mut Vec<Game>, flash: FlashSize, scc_align:
 
     let (mut scc, rest): (Vec<Game>, Vec<Game>) = games.drain(..)
         .partition(|g| matches!(g.mapper,
-            MapperKind::Scc | MapperKind::Ascii16K5 | MapperKind::Mg2));
+            MapperKind::Scc | MapperKind::Ascii16K5 | MapperKind::Mg2
+                | MapperKind::GaliousEnhanced));
     let (mut mg1, mut non_scc): (Vec<Game>, Vec<Game>) = rest.into_iter()
         .partition(|g| matches!(g.mapper, MapperKind::Mg1 | MapperKind::Galious));
 
@@ -200,6 +204,10 @@ pub fn pack_games_with_stats(games: &mut Vec<Game>, flash: FlashSize, scc_align:
         let (mut start, step) = if scc_align {
             (align_up(GAMES_POOL_START / OFFR_UNIT, SCC_OFFR_ALIGN as usize),
              SCC_OFFR_ALIGN as usize)
+        } else if g.mapper == MapperKind::GaliousEnhanced {
+            // its 64KB save sector (relative bank 0x40) must stay 64KB-aligned
+            // in absolute flash: even OFFR also when packing sequentially
+            (align_up(GAMES_POOL_START / OFFR_UNIT, 2), 2)
         } else {
             (GAMES_POOL_START / OFFR_UNIT, 1)
         };
@@ -678,6 +686,29 @@ mod title_tests {
         assert_eq!(find("K4 32K").offr, 16);
         // the 16K game fills the first mirror unit (256K's mirror = unit 19)
         assert_eq!((find("P 16K").offr, find("P 16K").suboff), (19, 0x00));
+    }
+
+    #[test]
+    fn galious_enhanced_reserves_its_sector_on_an_even_offr() {
+        // 512KB native SCC, driver inside; 18 units = game + 64KB sector.
+        // Sequential packing (scc_align off) after a 32KB K4 game must still
+        // land on an even OFFR so relative bank 0x40 is 64KB-aligned.
+        for scc_align in [true, false] {
+            let mut games = vec![
+                Game::new("K4 32K".into(), vec![0u8; 32 * 1024], MapperKind::K4).unwrap(),
+                Game::new("GALIOUS ENH".into(), vec![0u8; 0x80000], MapperKind::GaliousEnhanced).unwrap(),
+            ];
+            assert_eq!(games[1].footprint_units, Some(18));
+            assert_eq!(games[1].flags, 0);
+            assert!(!games[1].needs_wrap_mirror);
+            let dropped = pack_games(&mut games, FlashSize::Mb8, scc_align).unwrap();
+            assert!(dropped.is_empty());
+            let ge = games.iter().find(|g| g.title == "GALIOUS ENH").unwrap();
+            assert_eq!(ge.offr % 2, 0, "scc_align={scc_align}");
+            let k4 = games.iter().find(|g| g.title == "K4 32K").unwrap();
+            let (a, b) = (ge.offr as usize, k4.offr as usize);
+            assert!(b < a || b >= a + 18, "K4 game inside the 18-unit footprint");
+        }
     }
 
     #[test]

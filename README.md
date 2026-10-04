@@ -299,6 +299,7 @@ and flash an image — for that, the manual above is enough.*
 | `packager/ascii8_to_k5.py` | Stand-alone ASCII8 → K5 converter (the GUI does this in memory). |
 | `packager/ascii16_to_k5.py` | Stand-alone ASCII16 → K5 converter (the GUI does this in memory). |
 | `packager/mg1_to_yamanooto.py` / `mg2_to_yamanooto.py` | Metal Gear 1 / 2 patchers: redirect cassette / Game Master 2 saves to a 64KB flash sector on the cartridge (the GUI applies them automatically to raw dumps). |
+| `packager/galious_enhanced_to_yamanooto.py` | The same for The Maze of Galious **Enhanced** (bladeba v1.04, MSX2): `mapper = "galious_enhanced"`, 512KB native SCC with the driver inside + one 64KB sector (the GUI applies it automatically to the raw Enhanced ROM). |
 | `packager/galious_to_yamanooto.py` | The Maze of Galious patcher: 3 save slots in a 64KB flash sector instead of the password (`mapper = "galious"`, same layout as `mg1`; the GUI applies it automatically to the raw dump). |
 | `probe/` | **K4-PROBE diagnostic ROM**: prints how the cartridge's mapper really behaves (register readbacks, K4 vs K5 decode, master offset). One flash distinguishes an old FPGA core from a current one. See `probe/EXPECTED.md`. |
 | `catalog/konami_catalog.toml` | Reference list of Konami MSX cartridge dumps with their mappers (informational). |

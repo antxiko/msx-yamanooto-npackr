@@ -92,6 +92,10 @@ MAPPER_MG2         = 'mg2'         # Metal Gear 2 patched by mg2_to_yamanooto.py
 MAPPER_MG1         = 'mg1'         # Metal Gear 1 patched by mg1_to_yamanooto.py —
                                     # Konami-4 + appended virtual-tape driver bank +
                                     # one 64KB save sector at relative bank 0x18.
+MAPPER_GALIOUS_ENH = 'galious_enhanced'  # The Maze of Galious Enhanced (bladeba
+                                    # v1.04) patched by galious_enhanced_to_yamanooto.py:
+                                    # native SCC 512KB, driver inside (bank 0x0C),
+                                    # 64KB save sector at relative bank 0x40.
 MAPPER_GALIOUS     = 'galious'     # The Maze of Galious patched by
                                     # galious_to_yamanooto.py — same layout as mg1
                                     # (K4 + driver bank 0x10 + sector at 0x18).
@@ -558,6 +562,15 @@ class Game:
             # in absolute flash. (Was 3x64KB=768KB before the append rewrite.)
             self.banks = (0, 1, 2, 3)
             self.footprint_units = 20
+        elif mapper == MAPPER_GALIOUS_ENH:
+            # The Maze of Galious Enhanced, patched by galious_enhanced_to_
+            # yamanooto.py: 512KB native KonamiSCC (full size: no wrap mirror)
+            # with its slots driver inside (bank 0x0C). The 64KB save sector
+            # is relative bank 0x40 (banks 0x40-0x47, left 0xFF here): 576KB
+            # (18-unit) footprint, placed like any SCC game; the OFFR must be
+            # even so the sector stays 64KB-aligned in absolute flash.
+            self.banks = (0, 1, 2, 3)
+            self.footprint_units = 18
         elif mapper in (MAPPER_MG1, MAPPER_GALIOUS):
             # Metal Gear 1, patched by mg1_to_yamanooto.py (128KB K4 ROM +
             # 8KB virtual-tape driver at relative bank 0x10). Its cassette
@@ -649,12 +662,13 @@ def pack_games(games, *, skip_overflow=False):
             occupied[i] = True
 
     # Partition games
-    scc_games  = [g for g in games if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2)]
+    scc_games  = [g for g in games
+                  if g.mapper in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2, MAPPER_GALIOUS_ENH)]
     sram_games = [g for g in games
                   if g.sram_type is not None or g.mapper in (MAPPER_MG1, MAPPER_GALIOUS)]
     non_scc    = [g for g in games
                   if g.mapper not in (MAPPER_SCC, MAPPER_ASCII16_K5, MAPPER_MG2, MAPPER_MG1,
-                                      MAPPER_GALIOUS)
+                                      MAPPER_GALIOUS, MAPPER_GALIOUS_ENH)
                   and g.sram_type is None]
 
     # Sort SCC games by size descending (place biggest first to avoid fragmentation).
@@ -686,6 +700,11 @@ def pack_games(games, *, skip_overflow=False):
         if _scc_align:
             start = _align_up(GAMES_POOL_START // OFFR_UNIT, SCC_OFFR_ALIGN)
             step = SCC_OFFR_ALIGN
+        elif g.mapper == MAPPER_GALIOUS_ENH:
+            # its 64KB save sector (relative bank 0x40) must stay 64KB-aligned
+            # in absolute flash: even OFFR also when packing sequentially
+            start = _align_up(GAMES_POOL_START // OFFR_UNIT, 2)
+            step = 2
         else:
             start = GAMES_POOL_START // OFFR_UNIT
             step = 1
@@ -1114,6 +1133,20 @@ def cmd_test(args):
     assert gimage[gbase + 0x10 * BANK_SIZE:gbase + 0x11 * BANK_SIZE] == bytes([0x5A]) * BANK_SIZE
     assert set(gimage[gbase + 0x18 * BANK_SIZE:gbase + 0x20 * BANK_SIZE]) == {0xFF}
     print(f"galious self-test: OFFR=0x{gal.offr:02X} driver@0x10 sector@0x18 blank OK")
+
+    # --- galious_enhanced self-test: native SCC 512KB (driver inside, bank
+    # 0x0C), 576KB footprint, even OFFR, 64KB save sector 0x40-0x47 blank ---
+    ge_data = bytearray(make_dummy_game(0x80000))
+    ge_data[0x0C * BANK_SIZE:0x0D * BANK_SIZE] = bytes([0x5A]) * BANK_SIZE
+    ge = Game("TEST GALIOUS ENH", bytes(ge_data), MAPPER_GALIOUS_ENH)
+    eimage, edropped = build_image(launcher_data, [ge])
+    assert not edropped and ge.flags == 0 and ge.footprint_units == 18
+    assert not ge.needs_wrap_mirror
+    assert ge.offr % 2 == 0, ge.offr
+    ebase = ge.offr * 4 * BANK_SIZE
+    assert eimage[ebase + 0x0C * BANK_SIZE:ebase + 0x0D * BANK_SIZE] == bytes([0x5A]) * BANK_SIZE
+    assert set(eimage[ebase + 0x40 * BANK_SIZE:ebase + 0x48 * BANK_SIZE]) == {0xFF}
+    print(f"galious_enhanced self-test: OFFR=0x{ge.offr:02X} driver@0x0C sector@0x40 blank OK")
 
     out = here / "test_image.rom"
     out.write_bytes(image)

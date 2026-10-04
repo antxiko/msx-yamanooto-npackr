@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.7.4 — 2026-10-04
+
+- **The Maze of Galious Enhanced saves to the cartridge flash too.** bladeba's
+  v1.04 (MSX2, SCREEN 5, KonamiSCC 512KB; IPS applied to RC749) gets the same 3
+  save slots instead of the password, in the game's own font: in the password
+  room, after YES, keys 1/2/3 save; on the title screen, L shows the slots and
+  1/2/3 load. New mapper `galious_enhanced`: the game stays 512KB (shim in the
+  bank 3 tail the Enhanced blanks, driver in its blank bank 0x0C, mapped but
+  never read: measured in openMSX), plus one 64KB save sector at relative bank
+  0x40 (576KB footprint, packed as SCC on an even OFFR so the sector stays
+  64KB-aligned also with sequential packing). The GUI patches the raw Enhanced
+  on drop, or accepts an already-patched one; `packager/galious_enhanced_to_
+  yamanooto.py` is the CLI twin (byte-identical on the real ROM, see
+  `gui-rs/examples/mg_parity.rs`). Tested in openMSX: a pack built with
+  `yamanooto_pack.py`, the game launched from the menu, saved, emulator closed
+  and reopened, loaded with the items intact.
+  No launcher or flash-format change.
+
 ## v1.7.3 — 2026-10-04
 
 - **The Maze of Galious saves to the cartridge flash.** 3 save slots instead of
